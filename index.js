@@ -10,7 +10,7 @@ const io = socketIo(server, {
         origin: '*',
         methods: ['GET', 'POST']
     },
-    transports: ['polling', 'websocket'],
+opts.transports = new String[]{"polling"};
     pingTimeout: 120000,
     pingInterval: 60000
 });
