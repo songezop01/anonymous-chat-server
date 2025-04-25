@@ -3,7 +3,11 @@ const app = express();
 const http = require('http').Server(app);
 const io = require('socket.io')(http, {
     pingTimeout: 60000, // 等待 PONG 的時間，設為 60 秒
-    pingInterval: 25000 // 發送 PING 的間隔，設為 25 秒
+    pingInterval: 25000, // 發送 PING 的間隔，設為 25 秒
+    cors: { // 添加 CORS 配置
+        origin: "*", // 允許所有來源（可根據需要限制）
+        methods: ["GET", "POST"]
+    }
 });
 const port = process.env.PORT || 3000;
 
@@ -18,8 +22,18 @@ app.get('/', (req, res) => {
     res.send('Anonymous Chat Server');
 });
 
+// 添加全局錯誤處理
+app.use((err, req, res, next) => {
+    console.error('服務端錯誤:', err.stack);
+    res.status(500).send('伺服器錯誤');
+});
+
 io.on('connection', (socket) => {
     console.log(`用戶已連接: ${socket.id}`);
+
+    socket.on('error', (error) => {
+        console.error(`Socket 錯誤: ${socket.id}, 錯誤: ${error.message}`);
+    });
 
     socket.on('disconnect', (reason) => {
         console.log(`用戶已斷開: ${socket.id}, 原因: ${reason}`);
