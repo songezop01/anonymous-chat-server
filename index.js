@@ -11,8 +11,8 @@ const io = socketIo(server, {
         methods: ['GET', 'POST']
     },
     transports: ['polling', 'websocket'],
-    pingTimeout: 120000, // 增加到 120 秒
-    pingInterval: 60000 // 增加到 60 秒
+    pingTimeout: 120000,
+    pingInterval: 60000
 });
 
 app.get('/', (req, res) => {
@@ -38,7 +38,7 @@ const groups = [];
 
 io.on('connection', (socket) => {
     console.log('用戶已連接:', socket.id);
-    console.log('協議版本:', socket.conn.protocol);
+    console.log('協議版本:', socket.conn.protocol || '未知');
     console.log('傳輸協議:', socket.conn.transport.name);
 
     socket.on('error', (error) => {
@@ -47,6 +47,11 @@ io.on('connection', (socket) => {
 
     socket.on('connect_error', (error) => {
         console.log('Socket.IO 連線錯誤:', error);
+    });
+
+    socket.on('keepAlive', (data) => {
+        console.log('收到心跳:', data);
+        socket.emit('keepAliveResponse', 'pong'); // 回應客戶端
     });
 
     socket.on('register', (data) => {
