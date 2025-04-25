@@ -2,10 +2,10 @@ const express = require('express');
 const app = express();
 const http = require('http').Server(app);
 const io = require('socket.io')(http, {
-    pingTimeout: 60000, // 等待 PONG 的時間，設為 60 秒
-    pingInterval: 25000, // 發送 PING 的間隔，設為 25 秒
-    cors: { // 確保 CORS 配置正確
-        origin: "*", // 允許所有來源（可根據需要限制）
+    pingTimeout: 60000,
+    pingInterval: 25000,
+    cors: {
+        origin: ["http://localhost:3000", "https://anonymous-chat-server-d43x.onrender.com"],
         methods: ["GET", "POST"],
         credentials: true
     }
@@ -13,9 +13,13 @@ const io = require('socket.io')(http, {
 const port = process.env.PORT || 3000;
 
 // 用於儲存用戶和聊天數據
-const users = new Map(); // 儲存 UID 對應的 socket 和用戶信息
-const chats = new Map(); // 儲存聊天室信息
-const groupChats = new Map(); // 儲存群聊信息
+const users = new Map();
+const chats = new Map();
+const groupChats = new Map();
+
+// 儲存聊天訊息歷史
+const chatMessages = new Map(); // chatId -> [{fromUid, message, nickname, timestamp}]
+const groupChatMessages = new Map(); // chatId -> [{fromUid, message, nickname, timestamp}]
 
 app.use(express.static('public'));
 
@@ -23,7 +27,6 @@ app.get('/', (req, res) => {
     res.send('Anonymous Chat Server');
 });
 
-// 添加全局錯誤處理
 app.use((err, req, res, next) => {
     console.error('服務端錯誤:', err.stack);
     res.status(500).send('伺服器錯誤');
@@ -38,7 +41,6 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', (reason) => {
         console.log(`用戶已斷開: ${socket.id}, 原因: ${reason}`);
-        // 清理用戶數據
         for (let [uid, user] of users.entries()) {
             if (user.socket === socket) {
                 users.delete(uid);
@@ -53,7 +55,6 @@ io.on('connection', (socket) => {
             const username = data.username;
             const password = data.password;
 
-            // 檢查用戶名是否已存在
             let userExists = false;
             for (let user of users.values()) {
                 if (user.username === username) {
@@ -67,7 +68,6 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            // 生成唯一的 UID
             const uid = generateUid();
             users.set(uid, {
                 username: username,
@@ -100,7 +100,7 @@ io.on('connection', (socket) => {
             }
 
             if (foundUser) {
-                foundUser.socket = socket; // 更新 socket
+                foundUser.socket = socket;
                 socket.emit('loginResponse', { success: true, uid: uid });
             } else {
                 socket.emit('loginResponse', { success: false, message: '用戶名或密碼錯誤' });
@@ -144,10 +144,12 @@ io.on('connection', (socket) => {
 
             const chatId = generateUid();
             chats.set(chatId, { users: [fromUid, toUid] });
+            chatMessages.set(chatId, []); // 初始化訊息歷史
 
             const fromUser = users.get(fromUid);
             const toUser = users.get(toUid);
             toUser.socket.emit('chatRequest', { chatId: chatId, fromUid: fromUid, toUid: toUid });
+            fromUser.socket.emit('chatRequestResponse', { success: true, message: '聊天請求已發送' });
         } catch (error) {
             console.error('處理聊天請求失敗:', error);
             socket.emit('chatRequestFailed', { message: '聊天請求失敗: ' + error.message });
@@ -199,9 +201,14 @@ io.on('connection', (socket) => {
                 timestamp: timestamp
             };
 
-            // 只廣播給聊天室中的其他用戶（不包括發送者）
+            // 儲存訊息到歷史
+            if (!chatMessages.has(chatId)) {
+                chatMessages.set(chatId, []);
+            }
+            chatMessages.get(chatId).push(messageData);
+
             chat.users.forEach(userId => {
-                if (users.has(userId) && userId !== fromUid) { // 排除發送者
+                if (users.has(userId) && userId !== fromUid) {
                     const user = users.get(userId);
                     user.socket.emit('chatMessage', messageData);
                 }
@@ -216,9 +223,8 @@ io.on('connection', (socket) => {
         console.log('收到創建群聊請求:', data);
         try {
             const groupName = data.groupName;
-            const memberUids = data.memberUids; // 期望為一個數組
+            const memberUids = data.memberUids;
 
-            // 驗證成員
             const validMembers = memberUids.filter(uid => users.has(uid));
             if (validMembers.length === 0) {
                 socket.emit('createGroupChatResponse', { success: false, message: '無效的成員列表' });
@@ -230,6 +236,7 @@ io.on('connection', (socket) => {
                 name: groupName,
                 members: validMembers
             });
+            groupChatMessages.set(chatId, []); // 初始化訊息歷史
 
             validMembers.forEach(uid => {
                 const user = users.get(uid);
@@ -266,9 +273,13 @@ io.on('connection', (socket) => {
                 timestamp: timestamp
             };
 
-            // 群組訊息也應排除發送者
+            if (!groupChatMessages.has(chatId)) {
+                groupChatMessages.set(chatId, []);
+            }
+            groupChatMessages.get(chatId).push(messageData);
+
             groupChat.members.forEach(userId => {
-                if (users.has(userId) && userId !== fromUid) { // 排除發送者
+                if (users.has(userId) && userId !== fromUid) {
                     const user = users.get(userId);
                     user.socket.emit('groupMessage', messageData);
                 }
@@ -289,26 +300,30 @@ io.on('connection', (socket) => {
             }
 
             const chatList = [];
-            // 獲取一對一聊天
             for (let [chatId, chat] of chats.entries()) {
                 if (chat.users.includes(uid)) {
+                    const messages = chatMessages.get(chatId) || [];
+                    const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
+                    const otherUserId = chat.users.find(userId => userId !== uid);
+                    const otherUser = users.get(otherUserId);
                     chatList.push({
                         chatId: chatId,
                         type: 'private',
-                        name: chat.users.find(userId => userId !== uid),
-                        lastMessage: null // 可以在此處添加最近消息邏輯
+                        name: otherUser ? otherUser.nickname : otherUserId,
+                        lastMessage: lastMessage
                     });
                 }
             }
 
-            // 獲取群聊
             for (let [chatId, groupChat] of groupChats.entries()) {
                 if (groupChat.members.includes(uid)) {
+                    const messages = groupChatMessages.get(chatId) || [];
+                    const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
                     chatList.push({
                         chatId: chatId,
                         type: 'group',
                         name: groupChat.name,
-                        lastMessage: null // 可以在此處添加最近消息邏輯
+                        lastMessage: lastMessage
                     });
                 }
             }
