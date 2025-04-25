@@ -1,183 +1,110 @@
 const express = require('express');
 const http = require('http');
-const socketIo = require('socket.io');
+const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const server = http.createServer(app);
-const io = socketIo(server, {
+const io = new Server(server, {
     cors: {
-        origin: '*',
+        origin: '*', // 允許所有來源，僅用於測試，生產環境應限制
         methods: ['GET', 'POST']
     },
-    transports: ['polling', 'websocket'],
-    pingTimeout: 120000,
-    pingInterval: 60000
+    transports: ['polling', 'websocket'] // 確保支持 polling 和 websocket
 });
+
+const users = new Map();
 
 app.get('/', (req, res) => {
     res.send('Anonymous Chat Server is running');
 });
 
-app.get('/socket.io/*', (req, res, next) => {
-    console.log('收到輪詢請求:', req.url);
-    next();
-});
-
-app.post('/socket.io/*', (req, res, next) => {
-    console.log('收到輪詢 POST 請求:', req.url);
-    next();
-});
-
-app.use(express.static(__dirname));
-
-const users = [
-    { username: "test", password: "1234", uid: uuidv4(), macAddress: "02:00:00:00:00:00", socketId: null }
-]; // 添加默認用戶
-const messages = [];
-const chatRequests = [];
-const groups = [];
-
 io.on('connection', (socket) => {
-    console.log('用戶已連接:', socket.id);
-    console.log('協議版本:', socket.conn.protocol ?? '未知');
-    console.log('傳輸協議:', socket.conn.transport.name);
-    console.log('當前時間:', new Date().toISOString());
-
-    socket.on('error', (error) => {
-        console.log('Socket.IO 客戶端錯誤:', error);
-    });
-
-    socket.on('connect_error', (error) => {
-        console.log('Socket.IO 連線錯誤:', error);
-    });
+    console.log(`用戶已連接: ${socket.id}`);
 
     socket.on('keepAlive', (data) => {
-        console.log('收到心跳:', data);
+        console.log(`收到心跳: ${data}`);
         socket.emit('keepAliveResponse', 'pong');
     });
 
     socket.on('register', (data) => {
-        console.log('收到註冊請求:', data);
+        console.log(`收到註冊請求: ${JSON.stringify(data)}`);
         const { username, password, macAddress } = data;
-        if (users.find(u => u.username === username)) {
-            socket.emit('registerResponse', { success: false, message: '用戶名已存在' });
-            return;
-        }
-        if (users.find(u => u.macAddress === macAddress)) {
-            socket.emit('registerResponse', { success: false, message: '此設備已註冊' });
-            return;
-        }
         const uid = uuidv4();
-        const user = { username, password, uid, macAddress, socketId: socket.id };
-        users.push(user);
+        users.set(uid, { username, password, macAddress, socketId: socket.id });
         socket.emit('registerResponse', { success: true, uid });
-        console.log('用戶註冊成功:', user);
+        console.log(`用戶註冊成功，UID: ${uid}`);
     });
 
     socket.on('login', (data) => {
-        console.log('收到登入請求:', data);
-        console.log('當前用戶列表:', users);
+        console.log(`收到登入請求: ${JSON.stringify(data)}`);
         const { username, password } = data;
-        const user = users.find(u => u.username === username && u.password === password);
-        if (user) {
-            user.socketId = socket.id;
-            console.log('登入成功，發送回應:', { success: true, uid: user.uid });
-            socket.emit('loginResponse', { success: true, uid: user.uid });
-        } else {
-            console.log('登入失敗，發送回應:', { success: false, message: '用戶名或密碼錯誤' });
-            socket.emit('loginResponse', { success: false, message: '用戶名或密碼錯誤' });
+        for (const [uid, user] of users.entries()) {
+            if (user.username === username && user.password === password) {
+                user.socketId = socket.id;
+                socket.emit('loginResponse', { success: true, uid });
+                console.log(`用戶登入成功，UID: ${uid}`);
+                return;
+            }
         }
+        socket.emit('loginResponse', { success: false, message: '用戶名或密碼錯誤' });
+        console.log(`用戶登入失敗: ${username}`);
     });
 
     socket.on('chatRequest', (data, callback) => {
+        console.log(`收到聊天請求: ${JSON.stringify(data)}`);
         const { fromUid, toUid } = data;
-        const toUser = users.find(u => u.uid === toUid);
-        if (!toUser) {
-            callback({ success: false, message: '對方 UID 不存在' });
-            return;
+        const targetUser = users.get(toUid);
+        if (targetUser && targetUser.socketId) {
+            io.to(targetUser.socketId).emit('chatRequest', { fromUid, toUid });
+            callback({ success: true });
+        } else {
+            callback({ success: false, message: '目標用戶不存在或不在线' });
         }
-        chatRequests.push({ fromUid, toUid });
-        io.to(toUser.socketId).emit('chatRequest', { fromUid });
-        callback({ success: true });
     });
 
-    socket.on('chatResponse', (data) => {
-        const { fromUid, toUid, accepted } = data;
-        const request = chatRequests.find(r => r.fromUid === fromUid && r.toUid === toUid);
-        if (!request) return;
-        chatRequests.splice(chatRequests.indexOf(request), 1);
-        const fromUser = users.find(u => u.uid === fromUid);
-        if (accepted) {
+    socket.on('chatAccepted', (data) => {
+        console.log(`聊天請求被接受: ${JSON.stringify(data)}`);
+        const { fromUid, toUid } = data;
+        const fromUser = users.get(fromUid);
+        if (fromUser && fromUser.socketId) {
             io.to(fromUser.socketId).emit('chatAccepted', { toUid });
-        } else {
+        }
+    });
+
+    socket.on('chatRejected', (data) => {
+        console.log(`聊天請求被拒絕: ${JSON.stringify(data)}`);
+        const { fromUid, toUid } = data;
+        const fromUser = users.get(fromUid);
+        if (fromUser && fromUser.socketId) {
             io.to(fromUser.socketId).emit('chatRejected', { toUid });
         }
     });
 
     socket.on('chatMessage', (data) => {
-        const { fromUid, toUid, content, timestamp } = data;
-        const toUser = users.find(u => u.uid === toUid);
-        if (!toUser) return;
-        const message = { fromUid, toUid, content, timestamp };
-        messages.push(message);
-        io.to(toUser.socketId).emit('chatMessage', message);
-        console.log('一對一訊息:', message);
-    });
-
-    socket.on('getChatHistory', (data) => {
-        const { chatId } = data;
-        if (chatId.startsWith('group_')) {
-            const groupId = chatId.replace('group_', '');
-            const groupMessages = messages.filter(m => m.groupId === groupId);
-            socket.emit('chatHistory', { messages: groupMessages });
-            console.log('發送群組聊天歷史:', groupMessages);
-        } else {
-            const chatMessages = messages.filter(m => (m.fromUid === socket.uid && m.toUid === chatId) || (m.fromUid === chatId && m.toUid === socket.uid));
-            socket.emit('chatHistory', { messages: chatMessages });
-            console.log('發送一對一聊天歷史:', chatMessages);
+        console.log(`收到聊天訊息: ${JSON.stringify(data)}`);
+        const { fromUid, toUid, message } = data;
+        const targetUser = users.get(toUid);
+        if (targetUser && targetUser.socketId) {
+            io.to(targetUser.socketId).emit('chatMessage', { fromUid, message });
         }
-    });
-
-    socket.on('createGroup', (data, callback) => {
-        const { groupName, creatorUid } = data;
-        const groupId = uuidv4();
-        const group = { groupId, name: groupName, members: [creatorUid] };
-        groups.push(group);
-        callback({ success: true, groupId });
-        console.log('群組創建:', group);
-    });
-
-    socket.on('joinGroup', (data, callback) => {
-        const { groupId, uid } = data;
-        const group = groups.find(g => g.groupId === groupId);
-        if (!group) {
-            callback({ success: false, message: '群組不存在' });
-            return;
-        }
-        if (!group.members.includes(uid)) {
-            group.members.push(uid);
-        }
-        callback({ success: true });
     });
 
     socket.on('groupMessage', (data) => {
-        const { groupId, fromUid, content, timestamp } = data;
-        const group = groups.find(g => g.groupId === groupId);
-        if (!group) return;
-        const message = { groupId, fromUid, content, timestamp };
-        messages.push(message);
-        group.members.forEach(uid => {
-            const user = users.find(u => u.uid === uid);
-            if (user && user.socketId !== socket.id) {
-                io.to(user.socketId).emit('groupMessage', message);
-            }
-        });
-        console.log('群組訊息:', message);
+        console.log(`收到群組訊息: ${JSON.stringify(data)}`);
+        const { fromUid, groupId, message } = data;
+        io.emit('groupMessage', { fromUid, groupId, message });
     });
 
     socket.on('disconnect', () => {
-        console.log('用戶斷開:', socket.id);
+        console.log(`用戶已斷開: ${socket.id}`);
+        for (const [uid, user] of users.entries()) {
+            if (user.socketId === socket.id) {
+                user.socketId = null;
+                console.log(`用戶 ${uid} 已離線`);
+                break;
+            }
+        }
     });
 });
 
