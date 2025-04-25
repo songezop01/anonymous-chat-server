@@ -19,7 +19,6 @@ app.get('/', (req, res) => {
     res.send('Anonymous Chat Server is running');
 });
 
-// 記錄所有輪詢請求
 app.get('/socket.io/*', (req, res, next) => {
     console.log('收到輪詢請求:', req.url);
     next();
@@ -43,33 +42,33 @@ io.on('connection', (socket) => {
         console.log('Socket.IO 錯誤:', error);
     });
 
-    socket.on('register', (data, callback) => {
+    socket.on('register', (data) => {
         console.log('收到註冊請求:', data);
         const { username, password, macAddress } = data;
         if (users.find(u => u.username === username)) {
-            callback({ success: false, message: '用戶名已存在' });
+            socket.emit('registerResponse', { success: false, message: '用戶名已存在' });
             return;
         }
         if (users.find(u => u.macAddress === macAddress)) {
-            callback({ success: false, message: '此設備已註冊' });
+            socket.emit('registerResponse', { success: false, message: '此設備已註冊' });
             return;
         }
         const uid = uuidv4();
         const user = { username, password, uid, macAddress, socketId: socket.id };
         users.push(user);
-        callback({ success: true, uid });
+        socket.emit('registerResponse', { success: true, uid });
         console.log('用戶註冊成功:', user);
     });
 
-    socket.on('login', (data, callback) => {
+    socket.on('login', (data) => {
         console.log('收到登入請求:', data);
         const { username, password } = data;
         const user = users.find(u => u.username === username && u.password === password);
         if (user) {
             user.socketId = socket.id;
-            callback({ success: true, uid: user.uid });
+            socket.emit('loginResponse', { success: true, uid: user.uid });
         } else {
-            callback({ success: false, message: '用戶名或密碼錯誤' });
+            socket.emit('loginResponse', { success: false, message: '用戶名或密碼錯誤' });
         }
     });
 
