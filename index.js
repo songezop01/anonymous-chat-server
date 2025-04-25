@@ -90,6 +90,23 @@ io.on('connection', (socket) => {
         }
     });
 
+    // 獲取聊天列表
+    socket.on('getChatList', (data, callback) => {
+        const { uid } = data;
+        const userChatIds = userChats.get(uid) || [];
+        const userChatList = userChatIds.map(chatId => {
+            const chat = chats.get(chatId);
+            return {
+                chatId,
+                type: chat.type,
+                name: chat.name || (chat.type === 'private' ? getChatPartnerName(uid, chat.members) : chat.name),
+                members: chat.members,
+                lastMessage: chat.messages.length > 0 ? chat.messages[chat.messages.length - 1] : null
+            };
+        });
+        callback({ success: true, chatList: userChatList });
+    });
+
     // 發送聊天請求（一對一）
     socket.on('chatRequest', (data, callback) => {
         console.log('收到聊天請求:', data);
