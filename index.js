@@ -38,7 +38,7 @@ const groups = [];
 
 io.on('connection', (socket) => {
     console.log('用戶已連接:', socket.id);
-    console.log('協議版本:', socket.conn.protocol || '未知');
+    console.log('協議版本:', socket.conn.protocol ?? '未知'); // 使用 ?? 運算符
     console.log('傳輸協議:', socket.conn.transport.name);
 
     socket.on('error', (error) => {
@@ -51,7 +51,7 @@ io.on('connection', (socket) => {
 
     socket.on('keepAlive', (data) => {
         console.log('收到心跳:', data);
-        socket.emit('keepAliveResponse', 'pong'); // 回應客戶端
+        socket.emit('keepAliveResponse', 'pong');
     });
 
     socket.on('register', (data) => {
