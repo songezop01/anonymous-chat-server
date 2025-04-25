@@ -32,12 +32,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('keepAlive', (data) => {
-        console.log(`收到心跳: ${data}`);
-        socket.emit('keepAliveResponse', 'pong');
-    });
-
-    socket.on('register', (data, callback) => {
+    socket.on('register', (data) => {
         console.log('收到註冊請求:', data);
         try {
             const username = data.username;
@@ -53,7 +48,7 @@ io.on('connection', (socket) => {
             }
 
             if (userExists) {
-                callback({ success: false, message: '用戶名已存在' });
+                socket.emit('registerResponse', { success: false, message: '用戶名已存在' });
                 return;
             }
 
@@ -66,14 +61,14 @@ io.on('connection', (socket) => {
                 nickname: username
             });
 
-            callback({ success: true, uid: uid });
+            socket.emit('registerResponse', { success: true, uid: uid });
         } catch (error) {
             console.error('處理註冊失敗:', error);
-            callback({ success: false, message: '註冊失敗: ' + error.message });
+            socket.emit('registerResponse', { success: false, message: '註冊失敗: ' + error.message });
         }
     });
 
-    socket.on('login', (data, callback) => {
+    socket.on('login', (data) => {
         console.log('收到登入請求:', data);
         try {
             const username = data.username;
@@ -91,33 +86,33 @@ io.on('connection', (socket) => {
 
             if (foundUser) {
                 foundUser.socket = socket; // 更新 socket
-                callback({ success: true, uid: uid });
+                socket.emit('loginResponse', { success: true, uid: uid });
             } else {
-                callback({ success: false, message: '用戶名或密碼錯誤' });
+                socket.emit('loginResponse', { success: false, message: '用戶名或密碼錯誤' });
             }
         } catch (error) {
             console.error('處理登入失敗:', error);
-            callback({ success: false, message: '登入失敗: ' + error.message });
+            socket.emit('loginResponse', { success: false, message: '登入失敗: ' + error.message });
         }
     });
 
-    socket.on('updateNickname', (data, callback) => {
+    socket.on('updateNickname', (data) => {
         console.log('收到更新暱稱請求:', data);
         try {
             const uid = data.uid;
             const nickname = data.nickname;
 
             if (!users.has(uid)) {
-                callback({ success: false, message: '用戶不存在' });
+                socket.emit('updateNicknameResponse', { success: false, message: '用戶不存在' });
                 return;
             }
 
             const user = users.get(uid);
             user.nickname = nickname;
-            callback({ success: true, nickname: nickname });
+            socket.emit('updateNicknameResponse', { success: true, nickname: nickname });
         } catch (error) {
             console.error('處理更新暱稱失敗:', error);
-            callback({ success: false, message: '更新暱稱失敗: ' + error.message });
+            socket.emit('updateNicknameResponse', { success: false, message: '更新暱稱失敗: ' + error.message });
         }
     });
 
@@ -201,7 +196,7 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('createGroupChat', (data, callback) => {
+    socket.on('createGroupChat', (data) => {
         console.log('收到創建群聊請求:', data);
         try {
             const groupName = data.groupName;
@@ -210,7 +205,7 @@ io.on('connection', (socket) => {
             // 驗證成員
             const validMembers = memberUids.filter(uid => users.has(uid));
             if (validMembers.length === 0) {
-                callback({ success: false, message: '無效的成員列表' });
+                socket.emit('createGroupChatResponse', { success: false, message: '無效的成員列表' });
                 return;
             }
 
@@ -225,10 +220,10 @@ io.on('connection', (socket) => {
                 user.socket.emit('groupChatCreated', { chatId: chatId, name: groupName });
             });
 
-            callback({ success: true, chatId: chatId });
+            socket.emit('createGroupChatResponse', { success: true, chatId: chatId });
         } catch (error) {
             console.error('處理創建群聊失敗:', error);
-            callback({ success: false, message: '創建群聊失敗: ' + error.message });
+            socket.emit('createGroupChatResponse', { success: false, message: '創建群聊失敗: ' + error.message });
         }
     });
 
@@ -267,12 +262,12 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('getChatList', (data, callback) => {
+    socket.on('getChatList', (data) => {
         console.log('收到獲取聊天列表請求:', data);
         try {
             const uid = data.uid;
             if (!users.has(uid)) {
-                callback({ success: false, message: '用戶不存在' });
+                socket.emit('getChatListResponse', { success: false, message: '用戶不存在' });
                 return;
             }
 
@@ -301,10 +296,10 @@ io.on('connection', (socket) => {
                 }
             }
 
-            callback({ success: true, chatList: chatList });
+            socket.emit('getChatListResponse', { success: true, chatList: chatList });
         } catch (error) {
             console.error('處理獲取聊天列表失敗:', error);
-            callback({ success: false, message: '獲取聊天列表失敗: ' + error.message });
+            socket.emit('getChatListResponse', { success: false, message: '獲取聊天列表失敗: ' + error.message });
         }
     });
 });
