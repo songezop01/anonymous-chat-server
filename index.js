@@ -11,8 +11,8 @@ const io = socketIo(server, {
         methods: ['GET', 'POST']
     },
     transports: ['polling', 'websocket'],
-    pingTimeout: 60000,
-    pingInterval: 25000
+    pingTimeout: 60000, // 60 秒超時
+    pingInterval: 30000 // 30 秒心跳
 });
 
 app.get('/', (req, res) => {
