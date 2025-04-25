@@ -5,7 +5,13 @@ const { v4: uuidv4 } = require('uuid');
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
+const io = new Server(server, {
+    cors: {
+        origin: '*',
+        methods: ['GET', 'POST']
+    },
+    transports: ['polling']
+});
 
 // 用戶數據（模擬數據庫）
 const users = new Map(); // 存儲用戶信息 { uid: { username, password, macAddress, socketId, nickname } }
@@ -20,9 +26,9 @@ io.on('connection', (socket) => {
     console.log('用戶已連接:', socket.id);
 
     // 心跳檢測
-    socket.on('ping', () => {
-        console.log('收到心跳: ping');
-        socket.emit('pong');
+    socket.on('keepAlive', (data) => {
+        console.log('收到心跳:', data);
+        socket.emit('keepAliveResponse', 'pong');
     });
 
     // 註冊
@@ -101,10 +107,10 @@ io.on('connection', (socket) => {
             io.to(toSocketId).emit('chatRequest', { chatId, fromUid, toUid });
             console.log('已將聊天請求發送給 UID:', toUid, ', Socket ID:', toSocketId);
             if (typeof callback === 'function') {
-                callback({ success: true });
+                callback({ success: true, chatId });
             } else {
                 console.log('chatRequest 事件未收到有效的回調函數，將直接發送 chatRequestResponse 事件');
-                io.to(toSocketId).emit('chatRequestResponse', { success: true });
+                io.to(toSocketId).emit('chatRequestResponse', { success: true, chatId });
             }
         } else {
             if (typeof callback === 'function') {
@@ -148,20 +154,44 @@ io.on('connection', (socket) => {
         callback({ success: true, chatId, name: groupName, members });
     });
 
-    // 發送消息（支持一對一和群聊）
-    socket.on('sendMessage', (data) => {
+    // 發送消息（一對一）
+    socket.on('chatMessage', (data) => {
         console.log('收到聊天訊息:', data);
-        const { chatId, fromUid, message } = data;
-        const chat = chats.get(chatId);
-        if (chat) {
+        const { fromUid, toUid, message, chatId } = data;
+        let targetChatId = chatId;
+        if (!targetChatId) {
+            targetChatId = findExistingPrivateChat(fromUid, toUid);
+        }
+        if (targetChatId) {
+            const chat = chats.get(targetChatId);
             const messageData = { fromUid, message, timestamp: Date.now(), nickname: users.get(fromUid)?.nickname || users.get(fromUid)?.username };
             chat.messages.push(messageData);
             chat.members.forEach(memberUid => {
                 if (memberUid !== fromUid) {
                     const socketId = getSocketIdByUid(memberUid);
                     if (socketId) {
-                        io.to(socketId).emit('receiveMessage', { chatId, ...messageData });
+                        io.to(socketId).emit('chatMessage', { chatId: targetChatId, ...messageData });
                         console.log('已將訊息發送給 UID:', memberUid, ', Socket ID:', socketId);
+                    }
+                }
+            });
+        }
+    });
+
+    // 發送群聊消息
+    socket.on('groupMessage', (data) => {
+        console.log('收到群組訊息:', data);
+        const { chatId, fromUid, message } = data;
+        const chat = chats.get(chatId);
+        if (chat && chat.type === 'group') {
+            const messageData = { fromUid, message, timestamp: Date.now(), nickname: users.get(fromUid)?.nickname || users.get(fromUid)?.username };
+            chat.messages.push(messageData);
+            chat.members.forEach(memberUid => {
+                if (memberUid !== fromUid) {
+                    const socketId = getSocketIdByUid(memberUid);
+                    if (socketId) {
+                        io.to(socketId).emit('groupMessage', { chatId, ...messageData });
+                        console.log('已將群組訊息發送給 UID:', memberUid, ', Socket ID:', socketId);
                     }
                 }
             });
