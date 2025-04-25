@@ -43,7 +43,7 @@ io.on('connection', (socket) => {
         const { username, password } = data;
         for (const [uid, user] of users.entries()) {
             if (user.username === username && user.password === password) {
-                user.socketId = socket.id;
+                user.socketId = socket.id; // 更新 socketId
                 socket.emit('loginResponse', { success: true, uid });
                 console.log(`用戶登入成功，UID: ${uid}, 用戶名: ${username}, MAC: ${user.macAddress}`);
                 return;
@@ -63,9 +63,11 @@ io.on('connection', (socket) => {
 
         if (response.success) {
             io.to(targetUser.socketId).emit('chatRequest', { fromUid, toUid });
+            console.log(`已將聊天請求發送給 UID: ${toUid}, Socket ID: ${targetUser.socketId}`);
+        } else {
+            console.log(`無法發送聊天請求，目標用戶不在线: ${toUid}`);
         }
 
-        // 檢查 callback 是否為函數
         if (typeof callback === 'function') {
             callback(response);
         } else {
@@ -80,6 +82,9 @@ io.on('connection', (socket) => {
         const fromUser = users.get(fromUid);
         if (fromUser && fromUser.socketId) {
             io.to(fromUser.socketId).emit('chatAccepted', { toUid });
+            console.log(`已通知 UID: ${fromUid} 聊天請求被接受`);
+        } else {
+            console.log(`無法通知 UID: ${fromUid}，用戶不在线`);
         }
     });
 
@@ -89,6 +94,9 @@ io.on('connection', (socket) => {
         const fromUser = users.get(fromUid);
         if (fromUser && fromUser.socketId) {
             io.to(fromUser.socketId).emit('chatRejected', { toUid });
+            console.log(`已通知 UID: ${fromUid} 聊天請求被拒絕`);
+        } else {
+            console.log(`無法通知 UID: ${fromUid}，用戶不在线`);
         }
     });
 
@@ -98,6 +106,9 @@ io.on('connection', (socket) => {
         const targetUser = users.get(toUid);
         if (targetUser && targetUser.socketId) {
             io.to(targetUser.socketId).emit('chatMessage', { fromUid, message });
+            console.log(`已將訊息發送給 UID: ${toUid}, Socket ID: ${targetUser.socketId}`);
+        } else {
+            console.log(`無法發送訊息，目標用戶不在线: ${toUid}`);
         }
     });
 
