@@ -199,8 +199,9 @@ io.on('connection', (socket) => {
                 timestamp: timestamp
             };
 
+            // 只廣播給聊天室中的其他用戶（不包括發送者）
             chat.users.forEach(userId => {
-                if (users.has(userId)) {
+                if (users.has(userId) && userId !== fromUid) { // 排除發送者
                     const user = users.get(userId);
                     user.socket.emit('chatMessage', messageData);
                 }
@@ -265,8 +266,9 @@ io.on('connection', (socket) => {
                 timestamp: timestamp
             };
 
+            // 群組訊息也應排除發送者
             groupChat.members.forEach(userId => {
-                if (users.has(userId)) {
+                if (users.has(userId) && userId !== fromUid) { // 排除發送者
                     const user = users.get(userId);
                     user.socket.emit('groupMessage', messageData);
                 }
