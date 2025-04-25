@@ -2,13 +2,13 @@
   "name": "anonymous-chat-server",
   "version": "1.0.0",
   "description": "Anonymous chat server",
-  "main": "server.js",
+  "main": "index.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node index.js"
   },
   "dependencies": {
-    "express": "^5.1.0",
-    "socket.io": "^4.8.1",
+    "express": "^4.17.1",
+    "socket.io": "^2.5.0",
     "uuid": "^9.0.1"
   }
 }
