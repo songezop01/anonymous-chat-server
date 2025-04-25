@@ -17,6 +17,12 @@ app.get('/', (req, res) => {
     res.send('Anonymous Chat Server is running');
 });
 
+// 添加日誌以追蹤輪詢請求
+app.get('/socket.io/*', (req, res, next) => {
+    console.log('收到輪詢請求:', req.url);
+    next();
+});
+
 app.use(express.static(__dirname));
 
 const users = [];
