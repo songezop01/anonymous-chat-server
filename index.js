@@ -2,6 +2,10 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const { v4: uuidv4 } = require('uuid');
+const io = require("socket.io")(httpServer, {
+    pingTimeout: 60000, // 等待 PONG 的時間，設為 60 秒
+    pingInterval: 25000 // 發送 PING 的間隔，設為 25 秒
+});
 
 const app = express();
 const server = http.createServer(app);
