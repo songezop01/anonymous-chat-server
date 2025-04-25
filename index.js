@@ -20,12 +20,12 @@ app.get('/', (req, res) => {
 });
 
 app.get('/socket.io/*', (req, res, next) => {
-    console.log('收到輪詢請求:', req.url);
+    console.error('收到輪詢請求:', req.url);
     next();
 });
 
 app.post('/socket.io/*', (req, res, next) => {
-    console.log('收到輪詢 POST 請求:', req.url);
+    console.error('收到輪詢 POST 請求:', req.url);
     next();
 });
 
@@ -37,26 +37,26 @@ const chatRequests = [];
 const groups = [];
 
 io.on('connection', (socket) => {
-    console.log('用戶已連接:', socket.id);
-    console.log('協議版本:', socket.conn.protocol ?? '未知');
-    console.log('傳輸協議:', socket.conn.transport.name);
-    console.log('當前時間:', new Date().toISOString()); // 添加時間戳記
+    console.error('用戶已連接:', socket.id);
+    console.error('協議版本:', socket.conn.protocol ?? '未知');
+    console.error('傳輸協議:', socket.conn.transport.name);
+    console.error('當前時間:', new Date().toISOString()); // 添加時間戳記
 });
     socket.on('error', (error) => {
-        console.log('Socket.IO 客戶端錯誤:', error);
+        console.error('Socket.IO 客戶端錯誤:', error);
     });
 
     socket.on('connect_error', (error) => {
-        console.log('Socket.IO 連線錯誤:', error);
+        console.error('Socket.IO 連線錯誤:', error);
     });
 
     socket.on('keepAlive', (data) => {
-        console.log('收到心跳:', data);
+        console.error('收到心跳:', data);
         socket.emit('keepAliveResponse', 'pong');
     });
 
     socket.on('register', (data) => {
-        console.log('收到註冊請求:', data);
+        console.error('收到註冊請求:', data);
         const { username, password, macAddress } = data;
         if (users.find(u => u.username === username)) {
             socket.emit('registerResponse', { success: false, message: '用戶名已存在' });
@@ -70,11 +70,11 @@ io.on('connection', (socket) => {
         const user = { username, password, uid, macAddress, socketId: socket.id };
         users.push(user);
         socket.emit('registerResponse', { success: true, uid });
-        console.log('用戶註冊成功:', user);
+        console.error('用戶註冊成功:', user);
     });
 
     socket.on('login', (data) => {
-        console.log('收到登入請求:', data);
+        console.error('收到登入請求:', data);
         const { username, password } = data;
         const user = users.find(u => u.username === username && u.password === password);
         if (user) {
@@ -117,7 +117,7 @@ io.on('connection', (socket) => {
         const message = { fromUid, toUid, content, timestamp };
         messages.push(message);
         io.to(toUser.socketId).emit('chatMessage', message);
-        console.log('一對一訊息:', message);
+        console.error('一對一訊息:', message);
     });
 
     socket.on('createGroup', (data, callback) => {
@@ -126,7 +126,7 @@ io.on('connection', (socket) => {
         const group = { groupId, name: groupName, members: [creatorUid] };
         groups.push(group);
         callback({ success: true, groupId });
-        console.log('群組創建:', group);
+        console.error('群組創建:', group);
     });
 
     socket.on('joinGroup', (data, callback) => {
@@ -153,15 +153,15 @@ io.on('connection', (socket) => {
                 io.to(user.socketId).emit('groupMessage', message);
             }
         });
-        console.log('群組訊息:', message);
+        console.error('群組訊息:', message);
     });
 
     socket.on('disconnect', () => {
-        console.log('用戶斷開:', socket.id);
+        console.error('用戶斷開:', socket.id);
     });
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`服務器運行在端口 ${PORT}`);
+    console.error(`服務器運行在端口 ${PORT}`);
 });
