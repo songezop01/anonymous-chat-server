@@ -22,7 +22,7 @@ const groups = [];
 io.on('connection', (socket) => {
     console.log('用戶已連接:', socket.id);
     socket.on('register', (data, callback) => {
-        console.log('收到註冊請求:', data); // 添加日誌
+        console.log('收到註冊請求:', data);
         const { username, password, macAddress } = data;
         if (users.find(u => u.username === username)) {
             callback({ success: false, message: '用戶名已存在' });
@@ -40,7 +40,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('login', (data, callback) => {
-        console.log('收到登入請求:', data); // 添加日誌
+        console.log('收到登入請求:', data);
         const { username, password } = data;
         const user = users.find(u => u.username === username && u.password === password);
         if (user) {
@@ -97,7 +97,7 @@ io.on('connection', (socket) => {
 
     socket.on('joinGroup', (data, callback) => {
         const { groupId, uid } = data;
-        const group = groups.find(g => g.groupId === groupId);
+        const group groups.find(g => g.groupId === groupId);
         if (!group) {
             callback({ success: false, message: '群組不存在' });
             return;
