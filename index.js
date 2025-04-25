@@ -15,15 +15,18 @@ const io = socketIo(server, {
     pingInterval: 25000
 });
 
-
-// 添加根路徑處理
 app.get('/', (req, res) => {
     res.send('Anonymous Chat Server is running');
 });
 
-// 添加日誌以追蹤輪詢請求
+// 記錄所有輪詢請求
 app.get('/socket.io/*', (req, res, next) => {
     console.log('收到輪詢請求:', req.url);
+    next();
+});
+
+app.post('/socket.io/*', (req, res, next) => {
+    console.log('收到輪詢 POST 請求:', req.url);
     next();
 });
 
