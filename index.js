@@ -9,8 +9,12 @@ const io = socketIo(server, {
     cors: {
         origin: '*',
         methods: ['GET', 'POST']
-    }
+    },
+    transports: ['polling', 'websocket'],
+    pingTimeout: 60000,
+    pingInterval: 25000
 });
+
 
 // 添加根路徑處理
 app.get('/', (req, res) => {
@@ -145,13 +149,4 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
     console.log(`服務器運行在端口 ${PORT}`);
-});
-const io = socketIo(server, {
-    cors: {
-        origin: '*',
-        methods: ['GET', 'POST']
-    },
-    transports: ['polling', 'websocket'], // 明確指定支援的協議
-    pingTimeout: 60000, // 增加超時時間
-    pingInterval: 25000 // 調整心跳間隔
 });
