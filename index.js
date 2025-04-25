@@ -38,6 +38,7 @@ const groups = [];
 
 io.on('connection', (socket) => {
     console.log('用戶已連接:', socket.id);
+    console.log('協議版本:', socket.conn.protocol); // 記錄協議版本
     socket.on('error', (error) => {
         console.log('Socket.IO 錯誤:', error);
     });
