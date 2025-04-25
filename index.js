@@ -12,6 +12,11 @@ const io = socketIo(server, {
     }
 });
 
+// 添加根路徑處理
+app.get('/', (req, res) => {
+    res.send('Anonymous Chat Server is running');
+});
+
 app.use(express.static(__dirname));
 
 const users = [];
@@ -101,7 +106,7 @@ io.on('connection', (socket) => {
 
     socket.on('joinGroup', (data, callback) => {
         const { groupId, uid } = data;
-        const group = groups.find(g => g.groupId === groupId); // 已修復語法錯誤
+        const group = groups.find(g => g.groupId === groupId);
         if (!group) {
             callback({ success: false, message: '群組不存在' });
             return;
