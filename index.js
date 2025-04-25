@@ -38,9 +38,10 @@ const groups = [];
 
 io.on('connection', (socket) => {
     console.log('用戶已連接:', socket.id);
-    console.log('協議版本:', socket.conn.protocol ?? '未知'); // 使用 ?? 運算符
+    console.log('協議版本:', socket.conn.protocol ?? '未知');
     console.log('傳輸協議:', socket.conn.transport.name);
-
+    console.log('當前時間:', new Date().toISOString()); // 添加時間戳記
+});
     socket.on('error', (error) => {
         console.log('Socket.IO 客戶端錯誤:', error);
     });
