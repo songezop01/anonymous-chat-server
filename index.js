@@ -40,8 +40,8 @@ io.on('connection', (socket) => {
     console.error('用戶已連接:', socket.id);
     console.error('協議版本:', socket.conn.protocol ?? '未知');
     console.error('傳輸協議:', socket.conn.transport.name);
-    console.error('當前時間:', new Date().toISOString()); // 添加時間戳記
-});
+    console.error('當前時間:', new Date().toISOString());
+
     socket.on('error', (error) => {
         console.error('Socket.IO 客戶端錯誤:', error);
     });
@@ -120,6 +120,21 @@ io.on('connection', (socket) => {
         console.error('一對一訊息:', message);
     });
 
+    socket.on('getChatHistory', (data) => {
+        const { chatId } = data;
+        // 假設 chatId 是 toUid（一對一聊天）或 group_ 開頭的群組 ID
+        if (chatId.startsWith('group_')) {
+            const groupId = chatId.replace('group_', '');
+            const groupMessages = messages.filter(m => m.groupId === groupId);
+            socket.emit('chatHistory', { messages: groupMessages });
+            console.error('發送群組聊天歷史:', groupMessages);
+        } else {
+            const chatMessages = messages.filter(m => (m.fromUid === socket.uid && m.toUid === chatId) || (m.fromUid === chatId && m.toUid === socket.uid));
+            socket.emit('chatHistory', { messages: chatMessages });
+            console.error('發送一對一聊天歷史:', chatMessages);
+        }
+    });
+
     socket.on('createGroup', (data, callback) => {
         const { groupName, creatorUid } = data;
         const groupId = uuidv4();
@@ -147,6 +162,7 @@ io.on('connection', (socket) => {
         const group = groups.find(g => g.groupId === groupId);
         if (!group) return;
         const message = { groupId, fromUid, content, timestamp };
+        messages.push(message); // 將群組訊息也存儲到 messages 數組
         group.members.forEach(uid => {
             const user = users.find(u => u.uid === uid);
             if (user && user.socketId !== socket.id) {
