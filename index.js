@@ -4,9 +4,10 @@ const http = require('http').Server(app);
 const io = require('socket.io')(http, {
     pingTimeout: 60000, // 等待 PONG 的時間，設為 60 秒
     pingInterval: 25000, // 發送 PING 的間隔，設為 25 秒
-    cors: { // 添加 CORS 配置
+    cors: { // 確保 CORS 配置正確
         origin: "*", // 允許所有來源（可根據需要限制）
-        methods: ["GET", "POST"]
+        methods: ["GET", "POST"],
+        credentials: true
     }
 });
 const port = process.env.PORT || 3000;
