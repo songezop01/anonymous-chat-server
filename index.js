@@ -21,6 +21,10 @@ const groups = [];
 
 io.on('connection', (socket) => {
     console.log('用戶已連接:', socket.id);
+    socket.on('error', (error) => {
+        console.log('Socket.IO 錯誤:', error);
+    });
+
     socket.on('register', (data, callback) => {
         console.log('收到註冊請求:', data);
         const { username, password, macAddress } = data;
@@ -97,7 +101,7 @@ io.on('connection', (socket) => {
 
     socket.on('joinGroup', (data, callback) => {
         const { groupId, uid } = data;
-        const group groups.find(g => g.groupId === groupId);
+        const group = groups.find(g => g.groupId === groupId); // 已修復語法錯誤
         if (!group) {
             callback({ success: false, message: '群組不存在' });
             return;
