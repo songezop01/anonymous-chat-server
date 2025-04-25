@@ -11,8 +11,8 @@ const io = socketIo(server, {
         methods: ['GET', 'POST']
     },
     transports: ['polling', 'websocket'],
-    pingTimeout: 60000, // 60 秒超時
-    pingInterval: 30000 // 30 秒心跳
+    pingTimeout: 60000,
+    pingInterval: 30000
 });
 
 app.get('/', (req, res) => {
@@ -38,9 +38,15 @@ const groups = [];
 
 io.on('connection', (socket) => {
     console.log('用戶已連接:', socket.id);
-    console.log('協議版本:', socket.conn.protocol); // 記錄協議版本
+    console.log('協議版本:', socket.conn.protocol);
+    console.log('傳輸協議:', socket.conn.transport.name);
+
     socket.on('error', (error) => {
-        console.log('Socket.IO 錯誤:', error);
+        console.log('Socket.IO 客戶端錯誤:', error);
+    });
+
+    socket.on('connect_error', (error) => {
+        console.log('Socket.IO 連線錯誤:', error);
     });
 
     socket.on('register', (data) => {
