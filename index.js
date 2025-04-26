@@ -14,8 +14,8 @@ const port = process.env.PORT || 3000;
 
 // 用於儲存用戶、好友和聊天數據
 const users = new Map(); // uid -> {username, password, nickname, socket, deviceInfo, friends}
-const chats = new Map(); // chatId -> {type: 'private', members: [uid1, uid2], name}
-const groupChats = new Map(); // chatId -> {type: 'group', name, members: [uids]}
+const chats = new Map(); // chatId -> {type: 'private', members: [uid1, uid2],/name}
+const groupChats = new Map(); // chatId -> {type: 'group', groupId, name, password, adminUid, members: [uids]}
 
 // 儲存聊天訊息歷史
 const chatMessages = new Map(); // chatId -> [{fromUid, message, nickname, timestamp}]
@@ -79,7 +79,7 @@ io.on('connection', (socket) => {
                     model: deviceInfo?.model || 'unknown',
                     osVersion: deviceInfo?.osVersion || 'unknown'
                 },
-                friends: [] // 儲存好友列表 [{uid, nickname}]
+                friends: []
             });
 
             socket.emit('registerResponse', { success: true, uid });
@@ -140,7 +140,6 @@ io.on('connection', (socket) => {
             const user = users.get(uid);
             user.nickname = nickname;
 
-            // 更新好友列表中的暱稱
             for (let [otherUid, otherUser] of users.entries()) {
                 otherUser.friends = otherUser.friends.map(friend =>
                     friend.uid === uid ? { uid, nickname } : friend
@@ -179,6 +178,48 @@ io.on('connection', (socket) => {
             socket.emit('friendRequestResponse', { success: true });
         } catch (error) {
             console.error('處理好友請求失敗:', error);
+            socket.emit('friendRequestResponse', { success: false, message: '發送好友請求失敗: ' + error.message });
+        }
+    });
+
+    socket.on('friendRequestByNickname', (data) => {
+        console.log('收到按暱稱好友請求:', data);
+        try {
+            const { fromUid, nickname } = data;
+
+            if (!users.has(fromUid)) {
+                socket.emit('friendRequestResponse', { success: false, message: '用戶不存在' });
+                return;
+            }
+
+            let toUser = null;
+            let toUid = null;
+            for (let [uid, user] of users.entries()) {
+                if (user.nickname === nickname) {
+                    toUser = user;
+                    toUid = uid;
+                    break;
+                }
+            }
+
+            if (!toUser) {
+                socket.emit('friendRequestResponse', { success: false, message: '找不到該暱稱的用戶' });
+                return;
+            }
+
+            const fromUser = users.get(fromUid);
+            if (fromUser.friends.some(f => f.uid === toUid)) {
+                socket.emit('friendRequestResponse', { success: false, message: '已是好友' });
+                return;
+            }
+
+            toUser.socket.emit('friendRequest', {
+                fromUid,
+                fromNickname: fromUser.nickname
+            });
+            socket.emit('friendRequestResponse', { success: true });
+        } catch (error) {
+            console.error('處理按暱稱好友請求失敗:', error);
             socket.emit('friendRequestResponse', { success: false, message: '發送好友請求失敗: ' + error.message });
         }
     });
@@ -270,6 +311,222 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('createGroupChat', (data) => {
+        console.log('收到創建群聊請求:', data);
+        try {
+            const { groupName, password, memberUids } = data;
+
+            const validMembers = memberUids.filter(uid => users.has(uid));
+            if (validMembers.length === 0) {
+                socket.emit('createGroupChatResponse', { success: false, message: '無效的成員列表' });
+                return;
+            }
+
+            const chatId = generateUid();
+            const groupId = generateUid();
+            groupChats.set(chatId, {
+                type: 'group',
+                groupId,
+                name: groupName,
+                password,
+                adminUid: validMembers[0], // 創建者為管理員
+                members: validMembers
+            });
+            groupChatMessages.set(chatId, []);
+
+            validMembers.forEach(uid => {
+                const user = users.get(uid);
+                user.socket.emit('groupChatCreated', { chatId, name: groupName, groupId });
+            });
+
+            socket.emit('createGroupChatResponse', { success: true, chatId, groupId });
+        } catch (error) {
+            console.error('處理創建群聊失敗:', error);
+            socket.emit('createGroupChatResponse', { success: false, message: '創建群聊失敗: ' + error.message });
+        }
+    });
+
+    socket.on('joinGroupRequest', (data) => {
+        console.log('收到加入群組請求:', data);
+        try {
+            const { groupId, password, fromUid } = data;
+
+            let groupChat = null;
+            let chatId = null;
+            for (let [id, group] of groupChats.entries()) {
+                if (group.groupId === groupId) {
+                    groupChat = group;
+                    chatId = id;
+                    break;
+                }
+            }
+
+            if (!groupChat) {
+                socket.emit('joinGroupResponse', { success: false, message: '群組不存在' });
+                return;
+            }
+
+            if (groupChat.password !== password) {
+                socket.emit('joinGroupResponse', { success: false, message: '密碼錯誤' });
+                return;
+            }
+
+            if (!users.has(fromUid) || !users.has(groupChat.adminUid)) {
+                socket.emit('joinGroupResponse', { success: false, message: '用戶不存在' });
+                return;
+            }
+
+            const fromUser = users.get(fromUid);
+            const adminUser = users.get(groupChat.adminUid);
+            adminUser.socket.emit('joinGroupRequest', {
+                groupId,
+                fromUid,
+                fromNickname: fromUser.nickname
+            });
+            socket.emit('joinGroupResponse', { success: true });
+        } catch (error) {
+            console.error('處理加入群組請求失敗:', error);
+            socket.emit('joinGroupResponse', { success: false, message: '發送加入群組請求失敗: ' + error.message });
+        }
+    });
+
+    socket.on('approveJoinGroup', (data) => {
+        console.log('收到批准加入群組請求:', data);
+        try {
+            const { groupId, fromUid, toUid } = data;
+
+            let groupChat = null;
+            let chatId = null;
+            for (let [id, group] of groupChats.entries()) {
+                if (group.groupId === groupId) {
+                    groupChat = group;
+                    chatId = id;
+                    break;
+                }
+            }
+
+            if (!groupChat || groupChat.adminUid !== toUid || !users.has(fromUid)) {
+                return;
+            }
+
+            groupChat.members.push(fromUid);
+            const fromUser = users.get(fromUid);
+            fromUser.socket.emit('joinGroupApproved', {
+                chatId,
+                name: groupChat.name
+            });
+        } catch (error) {
+            console.error('處理批准加入群組失敗:', error);
+        }
+    });
+
+    socket.on('rejectJoinGroup', (data) => {
+        console.log('收到拒絕加入群組請求:', data);
+        try {
+            const { groupId, fromUid } = data;
+
+            if (!users.has(fromUid)) {
+                return;
+            }
+
+            const fromUser = users.get(fromUid);
+            fromUser.socket.emit('joinGroupRejected', { groupId });
+        } catch (error) {
+            console.error('處理拒絕加入群組失敗:', error);
+        }
+    });
+
+    socket.on('inviteToGroup', (data) => {
+        console.log('收到邀請好友到群組請求:', data);
+        try {
+            const { fromUid, friendUids } = data;
+
+            if (!users.has(fromUid)) {
+                socket.emit('inviteToGroupResponse', { success: false, message: '用戶不存在' });
+                return;
+            }
+
+            let groupChat = null;
+            let chatId = null;
+            for (let [id, group] of groupChats.entries()) {
+                if (group.adminUid === fromUid) {
+                    groupChat = group;
+                    chatId = id;
+                    break;
+                }
+            }
+
+            if (!groupChat) {
+                socket.emit('inviteToGroupResponse', { success: false, message: '你不是群組管理員' });
+                return;
+            }
+
+            const fromUser = users.get(fromUid);
+            friendUids.forEach(friendUid => {
+                if (users.has(friendUid)) {
+                    const friend = users.get(friendUid);
+                    friend.socket.emit('inviteToGroup', {
+                        groupId: groupChat.groupId,
+                        groupName: groupChat.name,
+                        fromUid,
+                        fromNickname: fromUser.nickname
+                    });
+                }
+            });
+
+            socket.emit('inviteToGroupResponse', { success: true });
+        } catch (error) {
+            console.error('處理邀請好友到群組失敗:', error);
+            socket.emit('inviteToGroupResponse', { success: false, message: '邀請好友失敗: ' + error.message });
+        }
+    });
+
+    socket.on('acceptGroupInvite', (data) => {
+        console.log('收到接受群組邀請:', data);
+        try {
+            const { groupId, fromUid, toUid } = data;
+
+            let groupChat = null;
+            let chatId = null;
+            for (let [id, group] of groupChats.entries()) {
+                if (group.groupId === groupId) {
+                    groupChat = group;
+                    chatId = id;
+                    break;
+                }
+            }
+
+            if (!groupChat || !users.has(toUid)) {
+                return;
+            }
+
+            groupChat.members.push(toUid);
+            const toUser = users.get(toUid);
+            toUser.socket.emit('joinGroupApproved', {
+                chatId,
+                name: groupChat.name
+            });
+        } catch (error) {
+            console.error('處理接受群組邀請失敗:', error);
+        }
+    });
+
+    socket.on('rejectGroupInvite', (data) => {
+        console.log('收到拒絕群組邀請:', data);
+        try {
+            const { groupId, fromUid, toUid } = data;
+
+            if (!users.has(fromUid)) {
+                return;
+            }
+
+            const fromUser = users.get(fromUid);
+            fromUser.socket.emit('groupInviteRejected', { groupId, toUid });
+        } catch (error) {
+            console.error('處理拒絕群組邀請失敗:', error);
+        }
+    });
+
     socket.on('chatMessage', (data) => {
         console.log('收到聊天訊息:', data);
         try {
@@ -305,37 +562,6 @@ io.on('connection', (socket) => {
         } catch (error) {
             console.error('處理聊天訊息失敗:', error);
             socket.emit('chatMessageFailed', { message: '發送訊息失敗: ' + error.message });
-        }
-    });
-
-    socket.on('createGroupChat', (data) => {
-        console.log('收到創建群聊請求:', data);
-        try {
-            const { groupName, memberUids } = data;
-
-            const validMembers = memberUids.filter(uid => users.has(uid));
-            if (validMembers.length === 0) {
-                socket.emit('createGroupChatResponse', { success: false, message: '無效的成員列表' });
-                return;
-            }
-
-            const chatId = generateUid();
-            groupChats.set(chatId, {
-                type: 'group',
-                name: groupName,
-                members: validMembers
-            });
-            groupChatMessages.set(chatId, []);
-
-            validMembers.forEach(uid => {
-                const user = users.get(uid);
-                user.socket.emit('groupChatCreated', { chatId, name: groupName });
-            });
-
-            socket.emit('createGroupChatResponse', { success: true, chatId });
-        } catch (error) {
-            console.error('處理創建群聊失敗:', error);
-            socket.emit('createGroupChatResponse', { success: false, message: '創建群聊失敗: ' + error.message });
         }
     });
 
