@@ -12,10 +12,10 @@ const io = require('socket.io')(http, {
 });
 const port = process.env.PORT || 3000;
 
-// 用於儲存用戶和聊天數據
-const users = new Map();
-const chats = new Map();
-const groupChats = new Map();
+// 用於儲存用戶、好友和聊天數據
+const users = new Map(); // uid -> {username, password, nickname, socket, deviceInfo, friends}
+const chats = new Map(); // chatId -> {type: 'private', members: [uid1, uid2], name}
+const groupChats = new Map(); // chatId -> {type: 'group', name, members: [uids]}
 
 // 儲存聊天訊息歷史
 const chatMessages = new Map(); // chatId -> [{fromUid, message, nickname, timestamp}]
@@ -52,8 +52,7 @@ io.on('connection', (socket) => {
     socket.on('register', (data) => {
         console.log('收到註冊請求:', data);
         try {
-            const username = data.username;
-            const password = data.password;
+            const { username, password, nickname, deviceInfo } = data;
 
             let userExists = false;
             for (let user of users.values()) {
@@ -70,13 +69,20 @@ io.on('connection', (socket) => {
 
             const uid = generateUid();
             users.set(uid, {
-                username: username,
-                password: password,
-                socket: socket,
-                nickname: username
+                username,
+                password,
+                nickname: nickname || username,
+                socket,
+                deviceInfo: {
+                    ipAddress: socket.handshake.address,
+                    androidId: deviceInfo?.androidId || 'unknown',
+                    model: deviceInfo?.model || 'unknown',
+                    osVersion: deviceInfo?.osVersion || 'unknown'
+                },
+                friends: [] // 儲存好友列表 [{uid, nickname}]
             });
 
-            socket.emit('registerResponse', { success: true, uid: uid });
+            socket.emit('registerResponse', { success: true, uid });
         } catch (error) {
             console.error('處理註冊失敗:', error);
             socket.emit('registerResponse', { success: false, message: '註冊失敗: ' + error.message });
@@ -86,8 +92,7 @@ io.on('connection', (socket) => {
     socket.on('login', (data) => {
         console.log('收到登入請求:', data);
         try {
-            const username = data.username;
-            const password = data.password;
+            const { username, password, deviceInfo } = data;
 
             let foundUser = null;
             let uid = null;
@@ -101,7 +106,18 @@ io.on('connection', (socket) => {
 
             if (foundUser) {
                 foundUser.socket = socket;
-                socket.emit('loginResponse', { success: true, uid: uid });
+                foundUser.deviceInfo = {
+                    ipAddress: socket.handshake.address,
+                    androidId: deviceInfo?.androidId || 'unknown',
+                    model: deviceInfo?.model || 'unknown',
+                    osVersion: deviceInfo?.osVersion || 'unknown'
+                };
+                socket.emit('loginResponse', {
+                    success: true,
+                    uid,
+                    username,
+                    nickname: foundUser.nickname
+                });
             } else {
                 socket.emit('loginResponse', { success: false, message: '用戶名或密碼錯誤' });
             }
@@ -114,8 +130,7 @@ io.on('connection', (socket) => {
     socket.on('updateNickname', (data) => {
         console.log('收到更新暱稱請求:', data);
         try {
-            const uid = data.uid;
-            const nickname = data.nickname;
+            const { uid, nickname } = data;
 
             if (!users.has(uid)) {
                 socket.emit('updateNicknameResponse', { success: false, message: '用戶不存在' });
@@ -124,66 +139,141 @@ io.on('connection', (socket) => {
 
             const user = users.get(uid);
             user.nickname = nickname;
-            socket.emit('updateNicknameResponse', { success: true, nickname: nickname });
+
+            // 更新好友列表中的暱稱
+            for (let [otherUid, otherUser] of users.entries()) {
+                otherUser.friends = otherUser.friends.map(friend =>
+                    friend.uid === uid ? { uid, nickname } : friend
+                );
+            }
+
+            socket.emit('updateNicknameResponse', { success: true, nickname });
         } catch (error) {
             console.error('處理更新暱稱失敗:', error);
             socket.emit('updateNicknameResponse', { success: false, message: '更新暱稱失敗: ' + error.message });
         }
     });
 
-    socket.on('chatRequest', (data) => {
-        console.log('收到聊天請求:', data);
+    socket.on('friendRequest', (data) => {
+        console.log('收到好友請求:', data);
         try {
-            const fromUid = data.fromUid;
-            const toUid = data.toUid;
+            const { fromUid, toUid } = data;
 
             if (!users.has(fromUid) || !users.has(toUid)) {
-                socket.emit('chatRequestFailed', { message: '用戶不存在' });
+                socket.emit('friendRequestResponse', { success: false, message: '用戶不存在' });
                 return;
             }
 
-            const chatId = generateUid();
-            chats.set(chatId, { users: [fromUid, toUid] });
-            chatMessages.set(chatId, []); // 初始化訊息歷史
-
             const fromUser = users.get(fromUid);
             const toUser = users.get(toUid);
-            toUser.socket.emit('chatRequest', { chatId: chatId, fromUid: fromUid, toUid: toUid });
-            fromUser.socket.emit('chatRequestResponse', { success: true, message: '聊天請求已發送' });
+
+            if (fromUser.friends.some(f => f.uid === toUid)) {
+                socket.emit('friendRequestResponse', { success: false, message: '已是好友' });
+                return;
+            }
+
+            toUser.socket.emit('friendRequest', {
+                fromUid,
+                fromNickname: fromUser.nickname
+            });
+            socket.emit('friendRequestResponse', { success: true });
         } catch (error) {
-            console.error('處理聊天請求失敗:', error);
-            socket.emit('chatRequestFailed', { message: '聊天請求失敗: ' + error.message });
+            console.error('處理好友請求失敗:', error);
+            socket.emit('friendRequestResponse', { success: false, message: '發送好友請求失敗: ' + error.message });
         }
     });
 
-    socket.on('acceptChatRequest', (data) => {
-        console.log('收到接受聊天請求:', data);
+    socket.on('acceptFriendRequest', (data) => {
+        console.log('收到接受好友請求:', data);
         try {
-            const chatId = data.chatId;
-            const fromUid = data.fromUid;
-            const toUid = data.toUid;
+            const { fromUid, toUid } = data;
 
-            if (!chats.has(chatId)) {
-                socket.emit('chatRequestFailed', { message: '聊天室不存在' });
+            if (!users.has(fromUid) || !users.has(toUid)) {
+                socket.emit('friendRequestFailed', { message: '用戶不存在' });
                 return;
             }
 
             const fromUser = users.get(fromUid);
             const toUser = users.get(toUid);
-            fromUser.socket.emit('chatRequestAccepted', { chatId: chatId, fromUid: fromUid, toUid: toUid });
-            toUser.socket.emit('chatRequestAccepted', { chatId: chatId, fromUid: fromUid, toUid: toUid });
+
+            fromUser.friends.push({ uid: toUid, nickname: toUser.nickname });
+            toUser.friends.push({ uid: fromUid, nickname: fromUser.nickname });
+
+            const chatId = generateUid();
+            chats.set(chatId, {
+                type: 'private',
+                members: [fromUid, toUid],
+                name: `${fromUser.nickname} & ${toUser.nickname}`
+            });
+            chatMessages.set(chatId, []);
+
+            fromUser.socket.emit('friendRequestAccepted', {
+                fromUid: toUid,
+                fromNickname: toUser.nickname,
+                chatId
+            });
+            toUser.socket.emit('friendRequestAccepted', {
+                fromUid,
+                fromNickname: fromUser.nickname,
+                chatId
+            });
         } catch (error) {
-            console.error('處理接受聊天請求失敗:', error);
-            socket.emit('chatRequestFailed', { message: '接受聊天請求失敗: ' + error.message });
+            console.error('處理接受好友請求失敗:', error);
+            socket.emit('friendRequestFailed', { message: '接受好友請求失敗: ' + error.message });
+        }
+    });
+
+    socket.on('rejectFriendRequest', (data) => {
+        console.log('收到拒絕好友請求:', data);
+        try {
+            const { fromUid, toUid } = data;
+
+            if (!users.has(fromUid)) {
+                return;
+            }
+
+            const fromUser = users.get(fromUid);
+            fromUser.socket.emit('friendRequestRejected', { fromUid: toUid });
+        } catch (error) {
+            console.error('處理拒絕好友請求失敗:', error);
+            socket.emit('friendRequestFailed', { message: '拒絕好友請求失敗: ' + error.message });
+        }
+    });
+
+    socket.on('startFriendChat', (data) => {
+        console.log('收到開始好友聊天請求:', data);
+        try {
+            const { fromUid, toUid } = data;
+
+            if (!users.has(fromUid) || !users.has(toUid)) {
+                socket.emit('startFriendChatResponse', { success: false, message: '用戶不存在' });
+                return;
+            }
+
+            let chatId = null;
+            for (let [id, chat] of chats.entries()) {
+                if (chat.type === 'private' && chat.members.includes(fromUid) && chat.members.includes(toUid)) {
+                    chatId = id;
+                    break;
+                }
+            }
+
+            if (!chatId) {
+                socket.emit('startFriendChatResponse', { success: false, message: '聊天不存在' });
+                return;
+            }
+
+            socket.emit('startFriendChatResponse', { success: true, chatId });
+        } catch (error) {
+            console.error('處理開始好友聊天失敗:', error);
+            socket.emit('startFriendChatResponse', { success: false, message: '開始聊天失敗: ' + error.message });
         }
     });
 
     socket.on('chatMessage', (data) => {
         console.log('收到聊天訊息:', data);
         try {
-            const chatId = data.chatId;
-            const fromUid = data.fromUid;
-            const message = data.message;
+            const { chatId, fromUid, message } = data;
 
             if (!chats.has(chatId)) {
                 socket.emit('chatMessageFailed', { message: '聊天室不存在' });
@@ -191,23 +281,22 @@ io.on('connection', (socket) => {
             }
 
             const chat = chats.get(chatId);
-            const timestamp = Date.now();
             const fromUser = users.get(fromUid);
+            const timestamp = Date.now();
             const messageData = {
-                chatId: chatId,
-                fromUid: fromUid,
-                message: message,
+                chatId,
+                fromUid,
+                message,
                 nickname: fromUser.nickname,
-                timestamp: timestamp
+                timestamp
             };
 
-            // 儲存訊息到歷史
             if (!chatMessages.has(chatId)) {
                 chatMessages.set(chatId, []);
             }
             chatMessages.get(chatId).push(messageData);
 
-            chat.users.forEach(userId => {
+            chat.members.forEach(userId => {
                 if (users.has(userId) && userId !== fromUid) {
                     const user = users.get(userId);
                     user.socket.emit('chatMessage', messageData);
@@ -222,8 +311,7 @@ io.on('connection', (socket) => {
     socket.on('createGroupChat', (data) => {
         console.log('收到創建群聊請求:', data);
         try {
-            const groupName = data.groupName;
-            const memberUids = data.memberUids;
+            const { groupName, memberUids } = data;
 
             const validMembers = memberUids.filter(uid => users.has(uid));
             if (validMembers.length === 0) {
@@ -233,17 +321,18 @@ io.on('connection', (socket) => {
 
             const chatId = generateUid();
             groupChats.set(chatId, {
+                type: 'group',
                 name: groupName,
                 members: validMembers
             });
-            groupChatMessages.set(chatId, []); // 初始化訊息歷史
+            groupChatMessages.set(chatId, []);
 
             validMembers.forEach(uid => {
                 const user = users.get(uid);
-                user.socket.emit('groupChatCreated', { chatId: chatId, name: groupName });
+                user.socket.emit('groupChatCreated', { chatId, name: groupName });
             });
 
-            socket.emit('createGroupChatResponse', { success: true, chatId: chatId });
+            socket.emit('createGroupChatResponse', { success: true, chatId });
         } catch (error) {
             console.error('處理創建群聊失敗:', error);
             socket.emit('createGroupChatResponse', { success: false, message: '創建群聊失敗: ' + error.message });
@@ -253,9 +342,7 @@ io.on('connection', (socket) => {
     socket.on('groupMessage', (data) => {
         console.log('收到群組訊息:', data);
         try {
-            const chatId = data.chatId;
-            const fromUid = data.fromUid;
-            const message = data.message;
+            const { chatId, fromUid, message } = data;
 
             if (!groupChats.has(chatId)) {
                 socket.emit('groupMessageFailed', { message: '群聊不存在' });
@@ -263,14 +350,14 @@ io.on('connection', (socket) => {
             }
 
             const groupChat = groupChats.get(chatId);
-            const timestamp = Date.now();
             const fromUser = users.get(fromUid);
+            const timestamp = Date.now();
             const messageData = {
-                chatId: chatId,
-                fromUid: fromUid,
-                message: message,
+                chatId,
+                fromUid,
+                message,
                 nickname: fromUser.nickname,
-                timestamp: timestamp
+                timestamp
             };
 
             if (!groupChatMessages.has(chatId)) {
@@ -293,7 +380,7 @@ io.on('connection', (socket) => {
     socket.on('getChatList', (data) => {
         console.log('收到獲取聊天列表請求:', data);
         try {
-            const uid = data.uid;
+            const { uid } = data;
             if (!users.has(uid)) {
                 socket.emit('getChatListResponse', { success: false, message: '用戶不存在' });
                 return;
@@ -301,16 +388,16 @@ io.on('connection', (socket) => {
 
             const chatList = [];
             for (let [chatId, chat] of chats.entries()) {
-                if (chat.users.includes(uid)) {
+                if (chat.members.includes(uid)) {
                     const messages = chatMessages.get(chatId) || [];
                     const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
-                    const otherUserId = chat.users.find(userId => userId !== uid);
+                    const otherUserId = chat.members.find(userId => userId !== uid);
                     const otherUser = users.get(otherUserId);
                     chatList.push({
-                        chatId: chatId,
+                        chatId,
                         type: 'private',
                         name: otherUser ? otherUser.nickname : otherUserId,
-                        lastMessage: lastMessage
+                        lastMessage
                     });
                 }
             }
@@ -320,18 +407,57 @@ io.on('connection', (socket) => {
                     const messages = groupChatMessages.get(chatId) || [];
                     const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
                     chatList.push({
-                        chatId: chatId,
+                        chatId,
                         type: 'group',
                         name: groupChat.name,
-                        lastMessage: lastMessage
+                        lastMessage
                     });
                 }
             }
 
-            socket.emit('getChatListResponse', { success: true, chatList: chatList });
+            socket.emit('getChatListResponse', { success: true, chatList });
         } catch (error) {
             console.error('處理獲取聊天列表失敗:', error);
             socket.emit('getChatListResponse', { success: false, message: '獲取聊天列表失敗: ' + error.message });
+        }
+    });
+
+    socket.on('getFriendList', (data) => {
+        console.log('收到獲取好友列表請求:', data);
+        try {
+            const { uid } = data;
+            if (!users.has(uid)) {
+                socket.emit('getFriendListResponse', { success: false, message: '用戶不存在' });
+                return;
+            }
+
+            const user = users.get(uid);
+            socket.emit('getFriendListResponse', { success: true, friends: user.friends });
+        } catch (error) {
+            console.error('處理獲取好友列表失敗:', error);
+            socket.emit('getFriendListResponse', { success: false, message: '獲取好友列表失敗: ' + error.message });
+        }
+    });
+
+    socket.on('getChatHistory', (data) => {
+        console.log('收到獲取聊天歷史請求:', data);
+        try {
+            const { chatId } = data;
+            let messages = [];
+
+            if (chats.has(chatId)) {
+                messages = chatMessages.get(chatId) || [];
+            } else if (groupChats.has(chatId)) {
+                messages = groupChatMessages.get(chatId) || [];
+            } else {
+                socket.emit('getChatHistoryResponse', { success: false, message: '聊天不存在' });
+                return;
+            }
+
+            socket.emit('getChatHistoryResponse', { success: true, messages });
+        } catch (error) {
+            console.error('處理獲取聊天歷史失敗:', error);
+            socket.emit('getChatHistoryResponse', { success: false, message: '獲取聊天歷史失敗: ' + error.message });
         }
     });
 });
