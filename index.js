@@ -14,7 +14,7 @@ const port = process.env.PORT || 3000;
 
 // 用於儲存用戶、好友和聊天數據
 const users = new Map(); // uid -> {username, password, nickname, socket, deviceInfo, friends}
-const chats = new Map(); // chatId -> {type: 'private', members: [uid1, uid2],/name}
+const chats = new Map(); // chatId -> {type: 'private', members: [uid1, uid2], name}
 const groupChats = new Map(); // chatId -> {type: 'group', groupId, name, password, adminUid, members: [uids]}
 
 // 儲存聊天訊息歷史
@@ -116,7 +116,7 @@ io.on('connection', (socket) => {
                     success: true,
                     uid,
                     username,
-                    nickname: foundUser.nickname
+                    nickname: foundUser.nickname || username
                 });
             } else {
                 socket.emit('loginResponse', { success: false, message: '用戶名或密碼錯誤' });
@@ -195,7 +195,7 @@ io.on('connection', (socket) => {
             let toUser = null;
             let toUid = null;
             for (let [uid, user] of users.entries()) {
-                if (user.nickname === nickname) {
+                if (user.nickname.toLowerCase() === nickname.toLowerCase()) {
                     toUser = user;
                     toUid = uid;
                     break;
@@ -221,6 +221,25 @@ io.on('connection', (socket) => {
         } catch (error) {
             console.error('處理按暱稱好友請求失敗:', error);
             socket.emit('friendRequestResponse', { success: false, message: '發送好友請求失敗: ' + error.message });
+        }
+    });
+
+    socket.on('searchUsers', (data) => {
+        console.log('收到搜尋用戶請求:', data);
+        try {
+            const { query } = data;
+            const results = [];
+
+            for (let [uid, user] of users.entries()) {
+                if (user.nickname.toLowerCase().includes(query.toLowerCase()) || uid.includes(query)) {
+                    results.push({ uid, nickname: user.nickname });
+                }
+            }
+
+            socket.emit('searchUsersResponse', { success: true, users: results });
+        } catch (error) {
+            console.error('處理搜尋用戶失敗:', error);
+            socket.emit('searchUsersResponse', { success: false, message: '搜尋用戶失敗: ' + error.message });
         }
     });
 
@@ -343,6 +362,30 @@ io.on('connection', (socket) => {
         } catch (error) {
             console.error('處理創建群聊失敗:', error);
             socket.emit('createGroupChatResponse', { success: false, message: '創建群聊失敗: ' + error.message });
+        }
+    });
+
+    socket.on('searchGroups', (data) => {
+        console.log('收到搜尋群組請求:', data);
+        try {
+            const { query } = data;
+            const results = [];
+
+            for (let [chatId, group] of groupChats.entries()) {
+                if (group.name.toLowerCase().includes(query.toLowerCase()) || group.groupId.includes(query)) {
+                    results.push({
+                        chatId,
+                        groupId: group.groupId,
+                        name: group.name,
+                        adminUid: group.adminUid
+                    });
+                }
+            }
+
+            socket.emit('searchGroupsResponse', { success: true, groups: results });
+        } catch (error) {
+            console.error('處理搜尋群組失敗:', error);
+            socket.emit('searchGroupsResponse', { success: false, message: '搜尋群組失敗: ' + error.message });
         }
     });
 
