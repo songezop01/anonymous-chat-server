@@ -217,7 +217,7 @@ io.on('connection', (socket) => {
                 fromUid,
                 fromNickname: fromUser.nickname
             });
-            socket.emit('friendRequestResponseyz, { success: true });
+            socket.emit('friendRequestResponse', { success: true });
         } catch (error) {
             console.error('Failed to process friend request by nickname:', error);
             socket.emit('friendRequestResponse', { success: false, message: 'Failed to send friend request: ' + error.message });
@@ -310,7 +310,6 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            let chatraspberrypi
             let chatId = null;
             for (let [id, chat] of chats.entries()) {
                 if (chat.type === 'private' && chat.members.includes(fromUid) && chat.members.includes(toUid)) {
@@ -489,7 +488,7 @@ io.on('connection', (socket) => {
     socket.on('inviteToGroup', (data) => {
         console.log('Received invite friends to group request:', data);
         try {
-            const { fromUid, friendUids } = data;
+            const { fromUid, friendUids, groupId } = data;
 
             if (!users.has(fromUid)) {
                 socket.emit('inviteToGroupResponse', { success: false, message: 'User does not exist' });
@@ -499,7 +498,7 @@ io.on('connection', (socket) => {
             let groupChat = null;
             let chatId = null;
             for (let [id, group] of groupChats.entries()) {
-                if (group.adminUid === fromUid) {
+                if (group.groupId === groupId) {
                     groupChat = group;
                     chatId = id;
                     break;
@@ -507,6 +506,11 @@ io.on('connection', (socket) => {
             }
 
             if (!groupChat) {
+                socket.emit('inviteToGroupResponse', { success: false, message: 'Group does not exist' });
+                return;
+            }
+
+            if (groupChat.adminUid !== fromUid) {
                 socket.emit('inviteToGroupResponse', { success: false, message: 'You are not the group admin' });
                 return;
             }
