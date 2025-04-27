@@ -2,8 +2,8 @@ const express = require('express');
 const app = express();
 const http = require('http').Server(app);
 const io = require('socket.io')(http, {
-    pingTimeout: 60000,
-    pingInterval: 25000,
+    pingTimeout: 120000, // 增加 pingTimeout 至 120 秒
+    pingInterval: 30000, // 增加 pingInterval 至 30 秒
     cors: {
         origin: ["http://localhost:3000", "https://anonymous-chat-server-d43x.onrender.com"],
         methods: ["GET", "POST"],
@@ -810,10 +810,14 @@ io.on('connection', (socket) => {
             }
             chatMessages.get(chatId).push(messageData);
 
+            // 推送給所有聊天成員，包括發送者
             chat.members.forEach(userId => {
-                if (users.has(userId) && userId !== fromUid && users.get(userId).socket && users.get(userId).socket.connected) {
+                if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
                     const user = users.get(userId);
                     user.socket.emit('chatMessage', messageData);
+                    console.log(`Sent chatMessage to ${userId} (Socket ID: ${user.socket.id}):`, messageData);
+                } else {
+                    console.log(`User ${userId} is offline or socket not connected, message stored for later delivery`);
                 }
             });
         } catch (error) {
@@ -853,6 +857,7 @@ io.on('connection', (socket) => {
             }
             groupChatMessages.get(chatId).push(messageData);
 
+            // 推送給所有群組成員，包括發送者
             groupChat.members.forEach(userId => {
                 if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
                     const user = users.get(userId);
