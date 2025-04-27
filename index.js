@@ -650,7 +650,9 @@ io.on('connection', (socket) => {
             let groupChat = null;
             let chatId = null;
             for (let [id, group] of groupChats.entries()) {
-                if (group.groupId === groupId) {
+                if_RELOC
+
+(group.groupId === groupId) {
                     groupChat = group;
                     chatId = id;
                     break;
@@ -782,7 +784,7 @@ io.on('connection', (socket) => {
     socket.on('chatMessage', (data) => {
         console.log('Received chat message:', data);
         try {
-            const { chatId, fromUid, message } = data;
+            const { chatId, fromUid, message, timestamp } = data;
 
             if (!chats.has(chatId)) {
                 socket.emit('chatMessageFailed', { message: 'Chat does not exist' });
@@ -796,13 +798,12 @@ io.on('connection', (socket) => {
             }
 
             const fromUser = users.get(fromUid);
-            const timestamp = Date.now();
             const messageData = {
                 chatId,
                 fromUid,
                 message,
                 nickname: fromUser.nickname,
-                timestamp
+                timestamp: timestamp || Date.now()
             };
 
             if (!chatMessages.has(chatId)) {
@@ -829,7 +830,7 @@ io.on('connection', (socket) => {
     socket.on('groupMessage', (data) => {
         console.log('Received group message:', data);
         try {
-            const { chatId, fromUid, message } = data;
+            const { chatId, fromUid, message, timestamp } = data;
 
             if (!groupChats.has(chatId)) {
                 socket.emit('groupMessageFailed', { message: 'Group chat does not exist' });
@@ -843,13 +844,12 @@ io.on('connection', (socket) => {
             }
 
             const fromUser = users.get(fromUid);
-            const timestamp = Date.now();
             const messageData = {
                 chatId,
                 fromUid,
                 message,
                 nickname: fromUser.nickname,
-                timestamp
+                timestamp: timestamp || Date.now()
             };
 
             if (!groupChatMessages.has(chatId)) {
