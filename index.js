@@ -650,9 +650,7 @@ io.on('connection', (socket) => {
             let groupChat = null;
             let chatId = null;
             for (let [id, group] of groupChats.entries()) {
-                if_RELOC
-
-(group.groupId === groupId) {
+                if (group.groupId === groupId) {
                     groupChat = group;
                     chatId = id;
                     break;
