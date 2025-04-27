@@ -256,8 +256,12 @@ io.on('connection', (socket) => {
             const fromUser = users.get(fromUid);
             const toUser = users.get(toUid);
 
-            fromUser.friends.push({ uid: toUid, nickname: toUser.nickname });
-            toUser.friends.push({ uid: fromUid, nickname: fromUser.nickname });
+            if (!fromUser.friends.some(f => f.uid === toUid)) {
+                fromUser.friends.push({ uid: toUid, nickname: toUser.nickname });
+            }
+            if (!toUser.friends.some(f => f.uid === fromUid)) {
+                toUser.friends.push({ uid: fromUid, nickname: fromUser.nickname });
+            }
 
             const chatId = generateUid();
             chats.set(chatId, {
@@ -419,6 +423,11 @@ io.on('connection', (socket) => {
                 return;
             }
 
+            if (groupChat.members.includes(fromUid)) {
+                socket.emit('joinGroupResponse', { success: false, message: 'Already a group member' });
+                return;
+            }
+
             const fromUser = users.get(fromUid);
             const adminUser = users.get(groupChat.adminUid);
             adminUser.socket.emit('joinGroupRequest', {
@@ -453,13 +462,30 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            groupChat.members.push(fromUid);
+            if (!groupChat.members.includes(fromUid)) {
+                groupChat.members.push(fromUid);
+            }
             const fromUser = users.get(fromUid);
             fromUser.socket.emit('joinGroupApproved', {
                 chatId,
                 name: groupChat.name
             });
             socket.emit('joinGroupResponse', { success: true, message: 'User added to group' });
+
+            // 推送系統訊息
+            const messageData = {
+                chatId,
+                type: 'system',
+                message: `${fromUser.nickname} has joined the group`,
+                timestamp: Date.now()
+            };
+            groupChatMessages.get(chatId).push(messageData);
+            groupChat.members.forEach(userId => {
+                if (users.has(userId)) {
+                    const user = users.get(userId);
+                    user.socket.emit('groupMessage', messageData);
+                }
+            });
         } catch (error) {
             console.error('Failed to process approve join group:', error);
             socket.emit('joinGroupResponse', { success: false, message: 'Failed to approve join group: ' + error.message });
@@ -517,7 +543,7 @@ io.on('connection', (socket) => {
 
             const fromUser = users.get(fromUid);
             friendUids.forEach(friendUid => {
-                if (users.has(friendUid)) {
+                if (users.has(friendUid) && !groupChat.members.includes(friendUid)) {
                     const friend = users.get(friendUid);
                     friend.socket.emit('inviteToGroup', {
                         groupId: groupChat.groupId,
@@ -555,13 +581,30 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            groupChat.members.push(toUid);
+            if (!groupChat.members.includes(toUid)) {
+                groupChat.members.push(toUid);
+            }
             const toUser = users.get(toUid);
             toUser.socket.emit('joinGroupApproved', {
                 chatId,
                 name: groupChat.name
             });
             socket.emit('joinGroupResponse', { success: true, message: 'Joined group successfully' });
+
+            // 推送系統訊息
+            const messageData = {
+                chatId,
+                type: 'system',
+                message: `${toUser.nickname} has joined the group`,
+                timestamp: Date.now()
+            };
+            groupChatMessages.get(chatId).push(messageData);
+            groupChat.members.forEach(userId => {
+                if (users.has(userId)) {
+                    const user = users.get(userId);
+                    user.socket.emit('groupMessage', messageData);
+                }
+            });
         } catch (error) {
             console.error('Failed to process accept group invite:', error);
             socket.emit('joinGroupResponse', { success: false, message: 'Failed to accept group invite: ' + error.message });
@@ -587,6 +630,74 @@ io.on('connection', (socket) => {
         }
     });
 
+    socket.on('leaveGroup', (data) => {
+        console.log('Received leave group request:', data);
+        try {
+            const { groupId, uid } = data;
+
+            let groupChat = null;
+            let chatId = null;
+            for (let [id, group] of groupChats.entries()) {
+                if (group.groupId === groupId) {
+                    groupChat = group;
+                    chatId = id;
+                    break;
+                }
+            }
+
+            if (!groupChat) {
+                socket.emit('leaveGroupResponse', { success: false, message: 'Group does not exist' });
+                return;
+            }
+
+            if (!users.has(uid)) {
+                socket.emit('leaveGroupResponse', { success: false, message: 'User does not exist' });
+                return;
+            }
+
+            if (!groupChat.members.includes(uid)) {
+                socket.emit('leaveGroupResponse', { success: false, message: 'Not a group member' });
+                return;
+            }
+
+            // 移除成員
+            groupChat.members = groupChat.members.filter(memberUid => memberUid !== uid);
+            const user = users.get(uid);
+
+            // 如果是管理員退出，選擇新管理員或解散群組
+            if (groupChat.adminUid === uid) {
+                if (groupChat.members.length > 0) {
+                    groupChat.adminUid = groupChat.members[0];
+                } else {
+                    groupChats.delete(chatId);
+                    groupChatMessages.delete(chatId);
+                }
+            }
+
+            // 推送系統訊息
+            if (groupChat.members.length > 0) {
+                const messageData = {
+                    chatId,
+                    type: 'system',
+                    message: `${user.nickname} has left the group`,
+                    timestamp: Date.now()
+                };
+                groupChatMessages.get(chatId).push(messageData);
+                groupChat.members.forEach(userId => {
+                    if (users.has(userId)) {
+                        const member = users.get(userId);
+                        member.socket.emit('groupMessage', messageData);
+                    }
+                });
+            }
+
+            socket.emit('leaveGroupResponse', { success: true, message: 'Left group successfully' });
+        } catch (error) {
+            console.error('Failed to process leave group:', error);
+            socket.emit('leaveGroupResponse', { success: false, message: 'Failed to leave group: ' + error.message });
+        }
+    });
+
     socket.on('chatMessage', (data) => {
         console.log('Received chat message:', data);
         try {
@@ -598,6 +709,11 @@ io.on('connection', (socket) => {
             }
 
             const chat = chats.get(chatId);
+            if (!chat.members.includes(fromUid)) {
+                socket.emit('chatMessageFailed', { message: 'Not a chat member' });
+                return;
+            }
+
             const fromUser = users.get(fromUid);
             const timestamp = Date.now();
             const messageData = {
@@ -636,6 +752,11 @@ io.on('connection', (socket) => {
             }
 
             const groupChat = groupChats.get(chatId);
+            if (!groupChat.members.includes(fromUid)) {
+                socket.emit('groupMessageFailed', { message: 'Not a group member' });
+                return;
+            }
+
             const fromUser = users.get(fromUid);
             const timestamp = Date.now();
             const messageData = {
@@ -673,8 +794,11 @@ io.on('connection', (socket) => {
             }
 
             const chatList = [];
+            const seenChatIds = new Set();
+
             for (let [chatId, chat] of chats.entries()) {
-                if (chat.members.includes(uid)) {
+                if (chat.members.includes(uid) && !seenChatIds.has(chatId)) {
+                    seenChatIds.add(chatId);
                     const messages = chatMessages.get(chatId) || [];
                     const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
                     const otherUserId = chat.members.find(userId => userId !== uid);
@@ -689,7 +813,8 @@ io.on('connection', (socket) => {
             }
 
             for (let [chatId, groupChat] of groupChats.entries()) {
-                if (groupChat.members.includes(uid)) {
+                if (groupChat.members.includes(uid) && !seenChatIds.has(chatId)) {
+                    seenChatIds.add(chatId);
                     const messages = groupChatMessages.get(chatId) || [];
                     const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
                     chatList.push({
@@ -718,7 +843,17 @@ io.on('connection', (socket) => {
             }
 
             const user = users.get(uid);
-            socket.emit('getFriendListResponse', { success: true, friends: user.friends });
+            const uniqueFriends = [];
+            const seenUids = new Set();
+
+            user.friends.forEach(friend => {
+                if (!seenUids.has(friend.uid)) {
+                    seenUids.add(friend.uid);
+                    uniqueFriends.push(friend);
+                }
+            });
+
+            socket.emit('getFriendListResponse', { success: true, friends: uniqueFriends });
         } catch (error) {
             console.error('Failed to process get friend list:', error);
             socket.emit('getFriendListResponse', { success: false, message: 'Failed to get friend list: ' + error.message });
