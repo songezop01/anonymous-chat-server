@@ -209,7 +209,6 @@ io.on('connection', (socket) => {
                 });
                 socket.emit('friendRequestResponse', { success: true });
             } else {
-                // 目標用戶離線，存儲好友請求
                 if (!pendingFriendRequests.has(toUid)) {
                     pendingFriendRequests.set(toUid, []);
                 }
@@ -264,7 +263,6 @@ io.on('connection', (socket) => {
                 });
                 socket.emit('friendRequestResponse', { success: true });
             } else {
-                // 目標用戶離線，存儲好友請求
                 if (!pendingFriendRequests.has(toUid)) {
                     pendingFriendRequests.set(toUid, []);
                 }
@@ -504,7 +502,6 @@ io.on('connection', (socket) => {
                 });
                 socket.emit('joinGroupResponse', { success: true });
             } else {
-                // 管理員離線，存儲加入請求
                 if (!pendingGroupJoinRequests.has(groupId)) {
                     pendingGroupJoinRequests.set(groupId, []);
                 }
@@ -553,7 +550,6 @@ io.on('connection', (socket) => {
             }
             socket.emit('joinGroupResponse', { success: true, message: 'User added to group' });
 
-            // 推送系統訊息
             const messageData = {
                 chatId,
                 type: 'system',
@@ -678,7 +674,6 @@ io.on('connection', (socket) => {
             }
             socket.emit('joinGroupResponse', { success: true, message: 'Joined group successfully' });
 
-            // 推送系統訊息
             const messageData = {
                 chatId,
                 type: 'system',
@@ -749,11 +744,9 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            // 移除成員
             groupChat.members = groupChat.members.filter(memberUid => memberUid !== uid);
             const user = users.get(uid);
 
-            // 如果是管理員退出，選擇新管理員或解散群組
             if (groupChat.adminUid === uid) {
                 if (groupChat.members.length > 0) {
                     groupChat.adminUid = groupChat.members[0];
@@ -763,7 +756,6 @@ io.on('connection', (socket) => {
                 }
             }
 
-            // 推送系統訊息
             if (groupChat.members.length > 0) {
                 const messageData = {
                     chatId,
@@ -865,9 +857,11 @@ io.on('connection', (socket) => {
                 if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
                     const user = users.get(userId);
                     user.socket.emit('groupMessage', messageData);
+                    console.log(`Sent groupMessage to ${userId} (Socket ID: ${user.socket.id}):`, messageData);
+                } else {
+                    console.log(`User ${userId} is offline or socket not connected, message stored for later delivery`);
                 }
             });
-            console.log(`Sent groupMessage to group ${chatId}:`, messageData);
         } catch (error) {
             console.error('Failed to process group message:', error);
             socket.emit('groupMessageFailed', { message: 'Failed to send group message: ' + error.message });
