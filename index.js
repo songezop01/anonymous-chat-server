@@ -10,14 +10,39 @@ const io = require('socket.io')(http, {
         credentials: true
     }
 });
+const { MongoClient } = require('mongodb'); // 引入 MongoDB 客戶端
 const port = process.env.PORT || 10000;
 
-const users = new Map();
-const chats = new Map();
-const groupChats = new Map();
-const chatMessages = new Map();
-const groupChatMessages = new Map();
-const pendingRequests = new Map(); // 統一存儲待處理好友和群組請求：uid -> [{type: 'friend', fromUid, fromNickname, timestamp}, {type: 'group', groupId, groupName, fromUid, fromNickname, timestamp}]
+// MongoDB 連線設定
+const uri = "mongodb://localhost:27017"; // MongoDB 連線 URI，根據你的環境調整
+const client = new MongoClient(uri);
+let db;
+
+// 連接到 MongoDB
+async function connectToMongo() {
+    try {
+        await client.connect();
+        console.log("Connected to MongoDB");
+        db = client.db("anonymousChat"); // 資料庫名稱
+        // 確保集合存在（MongoDB 會自動創建）
+        await db.createCollection("users");
+        await db.createCollection("chats");
+        await db.createCollection("groupChats");
+        await db.createCollection("chatMessages");
+        await db.createCollection("groupChatMessages");
+        await db.createCollection("pendingRequests");
+    } catch (error) {
+        console.error("Failed to connect to MongoDB:", error);
+        process.exit(1); // 如果連線失敗，退出程序
+    }
+}
+
+// 在伺服器啟動前連接到 MongoDB
+connectToMongo().then(() => {
+    http.listen(port, () => {
+        console.log(`Server running on port ${port}`);
+    });
+});
 
 app.use(express.static('public'));
 
@@ -39,38 +64,33 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', (reason) => {
         console.log(`User disconnected: ${socket.id}, Reason: ${reason}`);
-        for (let [uid, user] of users.entries()) {
-            if (user.socket === socket) {
-                users.delete(uid);
-                break;
-            }
-        }
+        // 不再直接移除用戶，而是更新在線狀態
+        db.collection('users').updateOne(
+            { socketId: socket.id },
+            { $set: { online: false, socketId: null } }
+        );
     });
 
-    socket.on('register', (data) => {
+    socket.on('register', async (data) => {
         console.log('Received register request:', data);
         try {
             const { username, password, nickname, deviceInfo } = data;
 
-            let userExists = false;
-            for (let user of users.values()) {
-                if (user.username === username) {
-                    userExists = true;
-                    break;
-                }
-            }
-
-            if (userExists) {
+            // 檢查用戶是否已存在
+            const existingUser = await db.collection('users').findOne({ username });
+            if (existingUser) {
                 socket.emit('registerResponse', { success: false, message: 'Username already exists' });
                 return;
             }
 
             const uid = generateUid();
-            users.set(uid, {
+            await db.collection('users').insertOne({
+                uid,
                 username,
                 password,
                 nickname: nickname || username,
-                socket,
+                socketId: socket.id,
+                online: true,
                 deviceInfo: {
                     ipAddress: socket.handshake.address,
                     androidId: deviceInfo?.androidId || 'unknown',
@@ -87,88 +107,85 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('login', (data) => {
+    socket.on('login', async (data) => {
         console.log('Received login request:', data);
         try {
             const { username, password, deviceInfo } = data;
 
-            let foundUser = null;
-            let uid = null;
-            for (let [key, user] of users.entries()) {
-                if (user.username === username && user.password === password) {
-                    foundUser = user;
-                    uid = key;
-                    break;
-                }
-            }
+            const user = await db.collection('users').findOne({ username, password });
+            if (user) {
+                // 更新用戶的 socket 和在線狀態
+                await db.collection('users').updateOne(
+                    { uid: user.uid },
+                    {
+                        $set: {
+                            socketId: socket.id,
+                            online: true,
+                            deviceInfo: {
+                                ipAddress: socket.handshake.address,
+                                androidId: deviceInfo?.androidId || 'unknown',
+                                model: deviceInfo?.model || 'unknown',
+                                osVersion: deviceInfo?.osVersion || 'unknown'
+                            }
+                        }
+                    }
+                );
 
-            if (foundUser) {
-                foundUser.socket = socket;
-                foundUser.deviceInfo = {
-                    ipAddress: socket.handshake.address,
-                    androidId: deviceInfo?.androidId || 'unknown',
-                    model: deviceInfo?.model || 'unknown',
-                    osVersion: deviceInfo?.osVersion || 'unknown'
-                };
                 socket.emit('loginResponse', {
                     success: true,
-                    uid,
+                    uid: user.uid,
                     username,
-                    nickname: foundUser.nickname || username
+                    nickname: user.nickname || username
                 });
 
-                for (let [chatId, chat] of chats.entries()) {
-                    if (chat.members.includes(uid)) {
-                        const messages = chatMessages.get(chatId) || [];
-                        messages.forEach(message => {
-                            socket.emit('chatMessage', message);
-                        });
-                    }
-                }
-                for (let [chatId, groupChat] of groupChats.entries()) {
-                    if (groupChat.members.includes(uid)) {
-                        const messages = groupChatMessages.get(chatId) || [];
-                        messages.forEach(message => {
-                            socket.emit('groupMessage', message);
-                        });
-                    }
+                // 推送私聊訊息
+                const userChats = await db.collection('chats').find({ members: user.uid }).toArray();
+                for (const chat of userChats) {
+                    const messages = await db.collection('chatMessages').find({ chatId: chat.chatId }).toArray();
+                    messages.forEach(message => {
+                        socket.emit('chatMessage', message);
+                    });
                 }
 
-                // 推送所有待處理請求（好友和群組）
-                if (pendingRequests.has(uid)) {
-                    const requests = pendingRequests.get(uid);
-                    requests.forEach(request => {
-                        if (request.type === 'friend') {
-                            socket.emit('friendRequest', {
-                                fromUid: request.fromUid,
-                                fromNickname: request.fromNickname
-                            });
-                        } else if (request.type === 'group') {
-                            socket.emit('inviteToGroup', {
-                                groupId: request.groupId,
-                                groupName: request.groupName,
-                                fromUid: request.fromUid,
-                                fromNickname: request.fromNickname
-                            });
-                        }
+                // 推送群組訊息
+                const userGroupChats = await db.collection('groupChats').find({ members: user.uid }).toArray();
+                for (const groupChat of userGroupChats) {
+                    const messages = await db.collection('groupChatMessages').find({ chatId: groupChat.chatId }).toArray();
+                    messages.forEach(message => {
+                        socket.emit('groupMessage', message);
                     });
-                    pendingRequests.delete(uid);
                 }
+
+                // 推送待處理請求
+                const requests = await db.collection('pendingRequests').find({ toUid: user.uid }).toArray();
+                requests.forEach(request => {
+                    if (request.type === 'friend') {
+                        socket.emit('friendRequest', {
+                            fromUid: request.fromUid,
+                            fromNickname: request.fromNickname
+                        });
+                    } else if (request.type === 'group') {
+                        socket.emit('inviteToGroup', {
+                            groupId: request.groupId,
+                            groupName: request.groupName,
+                            fromUid: request.fromUid,
+                            fromNickname: request.fromNickname
+                        });
+                    }
+                });
+                await db.collection('pendingRequests').deleteMany({ toUid: user.uid });
 
                 // 推送群組加入請求（給管理員）
-                for (let [groupId, requests] of pendingRequests.entries()) {
-                    const groupChat = Array.from(groupChats.entries()).find(([_, group]) => group.groupId === groupId)?.[1];
-                    if (groupChat && groupChat.adminUid === uid) {
-                        requests.forEach(request => {
-                            if (request.type === 'joinGroup') {
-                                socket.emit('joinGroupRequest', {
-                                    groupId,
-                                    fromUid: request.fromUid,
-                                    fromNickname: request.fromNickname
-                                });
-                            }
+                const adminGroups = await db.collection('groupChats').find({ adminUid: user.uid }).toArray();
+                for (const group of adminGroups) {
+                    const groupRequests = await db.collection('pendingRequests').find({ groupId: group.groupId, type: 'joinGroup' }).toArray();
+                    groupRequests.forEach(request => {
+                        socket.emit('joinGroupRequest', {
+                            groupId: group.groupId,
+                            fromUid: request.fromUid,
+                            fromNickname: request.fromNickname
                         });
-                    }
+                    });
                 }
             } else {
                 socket.emit('loginResponse', { success: false, message: 'Invalid username or password' });
@@ -179,24 +196,27 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('updateNickname', (data) => {
+    socket.on('updateNickname', async (data) => {
         console.log('Received update nickname request:', data);
         try {
             const { uid, nickname } = data;
 
-            if (!users.has(uid)) {
+            const user = await db.collection('users').findOne({ uid });
+            if (!user) {
                 socket.emit('updateNicknameResponse', { success: false, message: 'User does not exist' });
                 return;
             }
 
-            const user = users.get(uid);
-            user.nickname = nickname;
+            await db.collection('users').updateOne(
+                { uid },
+                { $set: { nickname } }
+            );
 
-            for (let [otherUid, otherUser] of users.entries()) {
-                otherUser.friends = otherUser.friends.map(friend =>
-                    friend.uid === uid ? { uid, nickname } : friend
-                );
-            }
+            // 更新所有好友列表中的暱稱
+            await db.collection('users').updateMany(
+                { "friends.uid": uid },
+                { $set: { "friends.$.nickname": nickname } }
+            );
 
             socket.emit('updateNicknameResponse', { success: true, nickname });
         } catch (error) {
@@ -205,36 +225,34 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('friendRequest', (data) => {
+    socket.on('friendRequest', async (data) => {
         console.log('Received friend request:', data);
         try {
             const { fromUid, toUid } = data;
 
-            if (!users.has(fromUid) || !users.has(toUid)) {
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
+            const toUser = await db.collection('users').findOne({ uid: toUid });
+
+            if (!fromUser || !toUser) {
                 socket.emit('friendRequestResponse', { success: false, message: 'User does not exist' });
                 return;
             }
-
-            const fromUser = users.get(fromUid);
-            const toUser = users.get(toUid);
 
             if (fromUser.friends.some(f => f.uid === toUid)) {
                 socket.emit('friendRequestResponse', { success: false, message: 'Already friends' });
                 return;
             }
 
-            if (toUser.socket && toUser.socket.connected) {
-                toUser.socket.emit('friendRequest', {
+            if (toUser.online && toUser.socketId) {
+                io.to(toUser.socketId).emit('friendRequest', {
                     fromUid,
                     fromNickname: fromUser.nickname
                 });
                 socket.emit('friendRequestResponse', { success: true });
             } else {
-                if (!pendingRequests.has(toUid)) {
-                    pendingRequests.set(toUid, []);
-                }
-                pendingRequests.get(toUid).push({
+                await db.collection('pendingRequests').insertOne({
                     type: 'friend',
+                    toUid,
                     fromUid,
                     fromNickname: fromUser.nickname,
                     timestamp: Date.now()
@@ -247,49 +265,39 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('friendRequestByNickname', (data) => {
+    socket.on('friendRequestByNickname', async (data) => {
         console.log('Received friend request by nickname:', data);
         try {
             const { fromUid, nickname } = data;
 
-            if (!users.has(fromUid)) {
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
+            if (!fromUser) {
                 socket.emit('friendRequestResponse', { success: false, message: 'User does not exist' });
                 return;
             }
 
-            let toUser = null;
-            let toUid = null;
-            for (let [uid, user] of users.entries()) {
-                if (user.nickname.toLowerCase() === nickname.toLowerCase() && uid !== fromUid) {
-                    toUser = user;
-                    toUid = uid;
-                    break;
-                }
-            }
-
+            const toUser = await db.collection('users').findOne({ nickname: new RegExp('^' + nickname + '$', 'i'), uid: { $ne: fromUid } });
             if (!toUser) {
                 socket.emit('friendRequestResponse', { success: false, message: 'No user found with this nickname' });
                 return;
             }
 
-            const fromUser = users.get(fromUid);
+            const toUid = toUser.uid;
             if (fromUser.friends.some(f => f.uid === toUid)) {
                 socket.emit('friendRequestResponse', { success: false, message: 'Already friends' });
                 return;
             }
 
-            if (toUser.socket && toUser.socket.connected) {
-                toUser.socket.emit('friendRequest', {
+            if (toUser.online && toUser.socketId) {
+                io.to(toUser.socketId).emit('friendRequest', {
                     fromUid,
                     fromNickname: fromUser.nickname
                 });
                 socket.emit('friendRequestResponse', { success: true });
             } else {
-                if (!pendingRequests.has(toUid)) {
-                    pendingRequests.set(toUid, []);
-                }
-                pendingRequests.get(toUid).push({
+                await db.collection('pendingRequests').insertOne({
                     type: 'friend',
+                    toUid,
                     fromUid,
                     fromNickname: fromUser.nickname,
                     timestamp: Date.now()
@@ -302,17 +310,24 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('searchUsers', (data) => {
+    socket.on('searchUsers', async (data) => {
         console.log('Received search users request:', data);
         try {
             const { query, fromUid } = data;
             const results = [];
 
-            for (let [uid, user] of users.entries()) {
-                if ((user.nickname.toLowerCase().includes(query.toLowerCase()) || user.username.toLowerCase().includes(query.toLowerCase()) || uid.includes(query)) && uid !== fromUid) {
-                    results.push({ uid, nickname: user.nickname });
-                }
-            }
+            const users = await db.collection('users').find({
+                $or: [
+                    { nickname: { $regex: query, $options: 'i' } },
+                    { username: { $regex: query, $options: 'i' } },
+                    { uid: { $regex: query, $options: 'i' } }
+                ],
+                uid: { $ne: fromUid }
+            }).toArray();
+
+            users.forEach(user => {
+                results.push({ uid: user.uid, nickname: user.nickname, online: user.online });
+            });
 
             socket.emit('searchUsersResponse', { success: true, users: results });
             console.log(`Sent searchUsersResponse to ${socket.id}:`, { success: true, users: results });
@@ -322,43 +337,50 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('acceptFriendRequest', (data) => {
+    socket.on('acceptFriendRequest', async (data) => {
         console.log('Received accept friend request:', data);
         try {
             const { fromUid, toUid } = data;
 
-            if (!users.has(fromUid) || !users.has(toUid)) {
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
+            const toUser = await db.collection('users').findOne({ uid: toUid });
+
+            if (!fromUser || !toUser) {
                 socket.emit('friendRequestFailed', { message: 'User does not exist' });
                 return;
             }
 
-            const fromUser = users.get(fromUid);
-            const toUser = users.get(toUid);
-
             if (!fromUser.friends.some(f => f.uid === toUid)) {
-                fromUser.friends.push({ uid: toUid, nickname: toUser.nickname });
+                await db.collection('users').updateOne(
+                    { uid: fromUid },
+                    { $push: { friends: { uid: toUid, nickname: toUser.nickname } } }
+                );
             }
             if (!toUser.friends.some(f => f.uid === fromUid)) {
-                toUser.friends.push({ uid: fromUid, nickname: fromUser.nickname });
+                await db.collection('users').updateOne(
+                    { uid: toUid },
+                    { $push: { friends: { uid: fromUid, nickname: fromUser.nickname } } }
+                );
             }
 
             const chatId = generateUid();
-            chats.set(chatId, {
+            await db.collection('chats').insertOne({
+                chatId,
                 type: 'private',
                 members: [fromUid, toUid],
                 name: `${fromUser.nickname} & ${toUser.nickname}`
             });
-            chatMessages.set(chatId, []);
+            await db.collection('chatMessages').insertOne({ chatId, messages: [] });
 
-            if (fromUser.socket && fromUser.socket.connected) {
-                fromUser.socket.emit('friendRequestAccepted', {
+            if (fromUser.online && fromUser.socketId) {
+                io.to(fromUser.socketId).emit('friendRequestAccepted', {
                     fromUid: toUid,
                     fromNickname: toUser.nickname,
                     chatId
                 });
             }
-            if (toUser.socket && toUser.socket.connected) {
-                toUser.socket.emit('friendRequestAccepted', {
+            if (toUser.online && toUser.socketId) {
+                io.to(toUser.socketId).emit('friendRequestAccepted', {
                     fromUid,
                     fromNickname: fromUser.nickname,
                     chatId
@@ -370,18 +392,14 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('rejectFriendRequest', (data) => {
+    socket.on('rejectFriendRequest', async (data) => {
         console.log('Received reject friend request:', data);
         try {
             const { fromUid, toUid } = data;
 
-            if (!users.has(fromUid)) {
-                return;
-            }
-
-            const fromUser = users.get(fromUid);
-            if (fromUser.socket && fromUser.socket.connected) {
-                fromUser.socket.emit('friendRequestRejected', { fromUid: toUid });
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
+            if (fromUser && fromUser.online && fromUser.socketId) {
+                io.to(fromUser.socketId).emit('friendRequestRejected', { fromUid: toUid });
             }
         } catch (error) {
             console.error('Failed to process reject friend request:', error);
@@ -389,42 +407,47 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('startFriendChat', (data) => {
+    socket.on('startFriendChat', async (data) => {
         console.log('Received start friend chat request:', data);
         try {
             const { fromUid, toUid } = data;
 
-            if (!users.has(fromUid) || !users.has(toUid)) {
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
+            const toUser = await db.collection('users').findOne({ uid: toUid });
+
+            if (!fromUser || !toUser) {
                 socket.emit('startFriendChatResponse', { success: false, message: 'User does not exist' });
                 return;
             }
 
-            let chatId = null;
-            for (let [id, chat] of chats.entries()) {
-                if (chat.type === 'private' && chat.members.includes(fromUid) && chat.members.includes(toUid)) {
-                    chatId = id;
-                    break;
-                }
-            }
+            const chat = await db.collection('chats').findOne({
+                type: 'private',
+                members: { $all: [fromUid, toUid] }
+            });
 
-            if (!chatId) {
+            if (!chat) {
                 socket.emit('startFriendChatResponse', { success: false, message: 'Chat does not exist' });
                 return;
             }
 
-            socket.emit('startFriendChatResponse', { success: true, chatId });
+            socket.emit('startFriendChatResponse', { success: true, chatId: chat.chatId });
         } catch (error) {
             console.error('Failed to process start friend chat:', error);
             socket.emit('startFriendChatResponse', { success: false, message: 'Failed to start chat: ' + error.message });
         }
     });
 
-    socket.on('createGroupChat', (data) => {
+    socket.on('createGroupChat', async (data) => {
         console.log('Received create group chat request:', data);
         try {
             const { groupName, password, memberUids } = data;
 
-            const validMembers = memberUids.filter(uid => users.has(uid));
+            const validMembers = [];
+            for (const uid of memberUids) {
+                if (await db.collection('users').findOne({ uid })) {
+                    validMembers.push(uid);
+                }
+            }
             if (validMembers.length === 0) {
                 socket.emit('createGroupChatResponse', { success: false, message: 'Invalid member list' });
                 return;
@@ -432,22 +455,23 @@ io.on('connection', (socket) => {
 
             const chatId = generateUid();
             const groupId = generateUid();
-            groupChats.set(chatId, {
-                type: 'group',
+            await db.collection('groupChats').insertOne({
+                chatId,
                 groupId,
+                type: 'group',
                 name: groupName,
                 password,
                 adminUid: validMembers[0],
                 members: validMembers
             });
-            groupChatMessages.set(chatId, []);
+            await db.collection('groupChatMessages').insertOne({ chatId, messages: [] });
 
-            validMembers.forEach(uid => {
-                const user = users.get(uid);
-                if (user.socket && user.socket.connected) {
-                    user.socket.emit('groupChatCreated', { chatId, name: groupName, groupId });
+            for (const uid of validMembers) {
+                const user = await db.collection('users').findOne({ uid });
+                if (user.online && user.socketId) {
+                    io.to(user.socketId).emit('groupChatCreated', { chatId, name: groupName, groupId });
                 }
-            });
+            }
 
             socket.emit('createGroupChatResponse', { success: true, chatId, groupId });
         } catch (error) {
@@ -456,31 +480,42 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('searchGroups', (data) => {
+    socket.on('searchGroups', async (data) => {
         console.log('Received search groups request:', data);
         try {
             const { query, password, fromUid } = data;
             const results = [];
 
-            for (let [chatId, group] of groupChats.entries()) {
-                if ((group.name.toLowerCase().includes(query.toLowerCase()) || group.groupId.includes(query)) && !group.members.includes(fromUid)) {
-                    results.push({
-                        chatId,
-                        groupId: group.groupId,
-                        name: group.name,
-                        adminUid: group.adminUid
-                    });
-                }
-            }
+            console.log(`Total groups in groupChats: ${await db.collection('groupChats').countDocuments()}`);
+            const groups = await db.collection('groupChats').find({
+                $or: [
+                    { name: { $regex: query, $options: 'i' } },
+                    { groupId: { $regex: query, $options: 'i' } }
+                ],
+                members: { $ne: fromUid }
+            }).toArray();
+
+            groups.forEach(group => {
+                results.push({
+                    chatId: group.chatId,
+                    groupId: group.groupId,
+                    name: group.name,
+                    adminUid: group.adminUid
+                });
+                console.log(`Found group: ${group.groupId}, name: ${group.name}, members: ${group.members}`);
+            });
 
             if (password) {
                 let joined = false;
-                for (let group of results) {
-                    const groupChat = Array.from(groupChats.entries()).find(([_, g]) => g.groupId === group.groupId)?.[1];
+                for (const group of results) {
+                    const groupChat = await db.collection('groupChats').findOne({ groupId: group.groupId });
                     if (groupChat && groupChat.password === password) {
                         if (!groupChat.members.includes(fromUid)) {
-                            groupChat.members.push(fromUid);
-                            const fromUser = users.get(fromUid);
+                            await db.collection('groupChats').updateOne(
+                                { groupId: group.groupId },
+                                { $push: { members: fromUid } }
+                            );
+                            const fromUser = await db.collection('users').findOne({ uid: fromUid });
                             socket.emit('joinGroupApproved', {
                                 chatId: group.chatId,
                                 name: groupChat.name
@@ -492,13 +527,17 @@ io.on('connection', (socket) => {
                                 message: `${fromUser.nickname} has joined the group`,
                                 timestamp: Date.now()
                             };
-                            groupChatMessages.get(group.chatId).push(messageData);
-                            groupChat.members.forEach(userId => {
-                                if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
-                                    const user = users.get(userId);
-                                    user.socket.emit('groupMessage', messageData);
+                            await db.collection('groupChatMessages').updateOne(
+                                { chatId: group.chatId },
+                                { $push: { messages: messageData } }
+                            );
+
+                            for (const userId of groupChat.members) {
+                                const user = await db.collection('users').findOne({ uid: userId });
+                                if (user.online && user.socketId) {
+                                    io.to(user.socketId).emit('groupMessage', messageData);
                                 }
-                            });
+                            }
                             joined = true;
                             socket.emit('searchGroupsResponse', { success: true, joined: true, chatId: group.chatId });
                             return;
@@ -517,21 +556,12 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('joinGroupRequest', (data) => {
+    socket.on('joinGroupRequest', async (data) => {
         console.log('Received join group request:', data);
         try {
             const { groupId, password, fromUid } = data;
 
-            let groupChat = null;
-            let chatId = null;
-            for (let [id, group] of groupChats.entries()) {
-                if (group.groupId === groupId) {
-                    groupChat = group;
-                    chatId = id;
-                    break;
-                }
-            }
-
+            const groupChat = await db.collection('groupChats').findOne({ groupId });
             if (!groupChat) {
                 socket.emit('joinGroupResponse', { success: false, message: 'Group does not exist' });
                 return;
@@ -542,7 +572,9 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            if (!users.has(fromUid) || !users.has(groupChat.adminUid)) {
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
+            const adminUser = await db.collection('users').findOne({ uid: groupChat.adminUid });
+            if (!fromUser || !adminUser) {
                 socket.emit('joinGroupResponse', { success: false, message: 'User does not exist' });
                 return;
             }
@@ -552,21 +584,17 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            const fromUser = users.get(fromUid);
-            const adminUser = users.get(groupChat.adminUid);
-            if (adminUser.socket && adminUser.socket.connected) {
-                adminUser.socket.emit('joinGroupRequest', {
+            if (adminUser.online && adminUser.socketId) {
+                io.to(adminUser.socketId).emit('joinGroupRequest', {
                     groupId,
                     fromUid,
                     fromNickname: fromUser.nickname
                 });
                 socket.emit('joinGroupResponse', { success: true });
             } else {
-                if (!pendingRequests.has(groupChat.adminUid)) {
-                    pendingRequests.set(groupChat.adminUid, []);
-                }
-                pendingRequests.get(groupChat.adminUid).push({
+                await db.collection('pendingRequests').insertOne({
                     type: 'joinGroup',
+                    toUid: groupChat.adminUid,
                     groupId,
                     fromUid,
                     fromNickname: fromUser.nickname,
@@ -580,70 +608,74 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('approveJoinGroup', (data) => {
+    socket.on('approveJoinGroup', async (data) => {
         console.log('Received approve join group request:', data);
         try {
             const { groupId, fromUid, toUid } = data;
 
-            let groupChat = null;
-            let chatId = null;
-            for (let [id, group] of groupChats.entries()) {
-                if (group.groupId === groupId) {
-                    groupChat = group;
-                    chatId = id;
-                    break;
-                }
-            }
-
-            if (!groupChat || groupChat.adminUid !== toUid || !users.has(fromUid)) {
+            const groupChat = await db.collection('groupChats').findOne({ groupId });
+            if (!groupChat || groupChat.adminUid !== toUid) {
                 socket.emit('joinGroupResponse', { success: false, message: 'Invalid request or user does not exist' });
                 return;
             }
 
-            if (!groupChat.members.includes(fromUid)) {
-                groupChat.members.push(fromUid);
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
+            if (!fromUser) {
+                socket.emit('joinGroupResponse', { success: false, message: 'User does not exist' });
+                return;
             }
-            const fromUser = users.get(fromUid);
-            if (fromUser.socket && fromUser.socket.connected) {
-                fromUser.socket.emit('joinGroupApproved', {
-                    chatId,
+
+            if (!groupChat.members.includes(fromUid)) {
+                await db.collection('groupChats').updateOne(
+                    { groupId },
+                    { $push: { members: fromUid } }
+                );
+            }
+
+            if (fromUser.online && fromUser.socketId) {
+                io.to(fromUser.socketId).emit('joinGroupApproved', {
+                    chatId: groupChat.chatId,
                     name: groupChat.name
                 });
             }
             socket.emit('joinGroupResponse', { success: true, message: 'User added to group' });
 
             const messageData = {
-                chatId,
+                chatId: groupChat.chatId,
                 type: 'system',
                 message: `${fromUser.nickname} has joined the group`,
                 timestamp: Date.now()
             };
-            groupChatMessages.get(chatId).push(messageData);
-            groupChat.members.forEach(userId => {
-                if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
-                    const user = users.get(userId);
-                    user.socket.emit('groupMessage', messageData);
+            await db.collection('groupChatMessages').updateOne(
+                { chatId: groupChat.chatId },
+                { $push: { messages: messageData } }
+            );
+
+            for (const userId of groupChat.members) {
+                const user = await db.collection('users').findOne({ uid: userId });
+                if (user.online && user.socketId) {
+                    io.to(user.socketId).emit('groupMessage', messageData);
                 }
-            });
+            }
         } catch (error) {
             console.error('Failed to process approve join group:', error);
             socket.emit('joinGroupResponse', { success: false, message: 'Failed to approve join group: ' + error.message });
         }
     });
 
-    socket.on('rejectJoinGroup', (data) => {
+    socket.on('rejectJoinGroup', async (data) => {
         console.log('Received reject join group request:', data);
         try {
             const { groupId, fromUid } = data;
 
-            if (!users.has(fromUid)) {
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
+            if (!fromUser) {
                 socket.emit('joinGroupResponse', { success: false, message: 'User does not exist' });
                 return;
             }
 
-            const fromUser = users.get(fromUid);
-            if (fromUser.socket && fromUser.socket.connected) {
-                fromUser.socket.emit('joinGroupRejected', { groupId });
+            if (fromUser.online && fromUser.socketId) {
+                io.to(fromUser.socketId).emit('joinGroupRejected', { groupId });
             }
             socket.emit('joinGroupResponse', { success: true, message: 'Join request rejected' });
         } catch (error) {
@@ -652,26 +684,18 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('inviteToGroup', (data) => {
+    socket.on('inviteToGroup', async (data) => {
         console.log('Received invite friends to group request:', data);
         try {
             const { fromUid, friendUids, groupId } = data;
 
-            if (!users.has(fromUid)) {
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
+            if (!fromUser) {
                 socket.emit('inviteToGroupResponse', { success: false, message: 'User does not exist' });
                 return;
             }
 
-            let groupChat = null;
-            let chatId = null;
-            for (let [id, group] of groupChats.entries()) {
-                if (group.groupId === groupId) {
-                    groupChat = group;
-                    chatId = id;
-                    break;
-                }
-            }
-
+            const groupChat = await db.collection('groupChats').findOne({ groupId });
             if (!groupChat) {
                 socket.emit('inviteToGroupResponse', { success: false, message: 'Group does not exist' });
                 return;
@@ -682,23 +706,21 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            const fromUser = users.get(fromUid);
-            friendUids.forEach(friendUid => {
-                if (users.has(friendUid) && !groupChat.members.includes(friendUid)) {
-                    const friend = users.get(friendUid);
-                    if (friend.socket && friend.socket.connected) {
-                        friend.socket.emit('inviteToGroup', {
+            for (const friendUid of friendUids) {
+                if (groupChat.members.includes(friendUid)) continue;
+                const friend = await db.collection('users').findOne({ uid: friendUid });
+                if (friend) {
+                    if (friend.online && friend.socketId) {
+                        io.to(friend.socketId).emit('inviteToGroup', {
                             groupId: groupChat.groupId,
                             groupName: groupChat.name,
                             fromUid,
                             fromNickname: fromUser.nickname
                         });
                     } else {
-                        if (!pendingRequests.has(friendUid)) {
-                            pendingRequests.set(friendUid, []);
-                        }
-                        pendingRequests.get(friendUid).push({
+                        await db.collection('pendingRequests').insertOne({
                             type: 'group',
+                            toUid: friendUid,
                             groupId: groupChat.groupId,
                             groupName: groupChat.name,
                             fromUid,
@@ -707,7 +729,7 @@ io.on('connection', (socket) => {
                         });
                     }
                 }
-            });
+            }
 
             socket.emit('inviteToGroupResponse', { success: true });
         } catch (error) {
@@ -716,70 +738,74 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('acceptGroupInvite', (data) => {
+    socket.on('acceptGroupInvite', async (data) => {
         console.log('Received accept group invite:', data);
         try {
             const { groupId, fromUid, toUid } = data;
 
-            let groupChat = null;
-            let chatId = null;
-            for (let [id, group] of groupChats.entries()) {
-                if (group.groupId === groupId) {
-                    groupChat = group;
-                    chatId = id;
-                    break;
-                }
+            const groupChat = await db.collection('groupChats').findOne({ groupId });
+            if (!groupChat) {
+                socket.emit('joinGroupResponse', { success: false, message: 'Group does not exist' });
+                return;
             }
 
-            if (!groupChat || !users.has(toUid)) {
-                socket.emit('joinGroupResponse', { success: false, message: 'Group or user does not exist' });
+            const toUser = await db.collection('users').findOne({ uid: toUid });
+            if (!toUser) {
+                socket.emit('joinGroupResponse', { success: false, message: 'User does not exist' });
                 return;
             }
 
             if (!groupChat.members.includes(toUid)) {
-                groupChat.members.push(toUid);
+                await db.collection('groupChats').updateOne(
+                    { groupId },
+                    { $push: { members: toUid } }
+                );
             }
-            const toUser = users.get(toUid);
-            if (toUser.socket && toUser.socket.connected) {
-                toUser.socket.emit('joinGroupApproved', {
-                    chatId,
+
+            if (toUser.online && toUser.socketId) {
+                io.to(toUser.socketId).emit('joinGroupApproved', {
+                    chatId: groupChat.chatId,
                     name: groupChat.name
                 });
             }
             socket.emit('joinGroupResponse', { success: true, message: 'Joined group successfully' });
 
             const messageData = {
-                chatId,
+                chatId: groupChat.chatId,
                 type: 'system',
                 message: `${toUser.nickname} has joined the group`,
                 timestamp: Date.now()
             };
-            groupChatMessages.get(chatId).push(messageData);
-            groupChat.members.forEach(userId => {
-                if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
-                    const user = users.get(userId);
-                    user.socket.emit('groupMessage', messageData);
+            await db.collection('groupChatMessages').updateOne(
+                { chatId: groupChat.chatId },
+                { $push: { messages: messageData } }
+            );
+
+            for (const userId of groupChat.members) {
+                const user = await db.collection('users').findOne({ uid: userId });
+                if (user.online && user.socketId) {
+                    io.to(user.socketId).emit('groupMessage', messageData);
                 }
-            });
+            }
         } catch (error) {
             console.error('Failed to process accept group invite:', error);
             socket.emit('joinGroupResponse', { success: false, message: 'Failed to accept group invite: ' + error.message });
         }
     });
 
-    socket.on('rejectGroupInvite', (data) => {
+    socket.on('rejectGroupInvite', async (data) => {
         console.log('Received reject group invite:', data);
         try {
             const { groupId, fromUid, toUid } = data;
 
-            if (!users.has(fromUid)) {
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
+            if (!fromUser) {
                 socket.emit('joinGroupResponse', { success: false, message: 'User does not exist' });
                 return;
             }
 
-            const fromUser = users.get(fromUid);
-            if (fromUser.socket && fromUser.socket.connected) {
-                fromUser.socket.emit('groupInviteRejected', { groupId, toUid });
+            if (fromUser.online && fromUser.socketId) {
+                io.to(fromUser.socketId).emit('groupInviteRejected', { groupId, toUid });
             }
             socket.emit('joinGroupResponse', { success: true, message: 'Group invite rejected' });
         } catch (error) {
@@ -788,27 +814,19 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('leaveGroup', (data) => {
+    socket.on('leaveGroup', async (data) => {
         console.log('Received leave group request:', data);
         try {
             const { groupId, uid } = data;
 
-            let groupChat = null;
-            let chatId = null;
-            for (let [id, group] of groupChats.entries()) {
-                if (group.groupId === groupId) {
-                    groupChat = group;
-                    chatId = id;
-                    break;
-                }
-            }
-
+            const groupChat = await db.collection('groupChats').findOne({ groupId });
             if (!groupChat) {
                 socket.emit('leaveGroupResponse', { success: false, message: 'Group does not exist' });
                 return;
             }
 
-            if (!users.has(uid)) {
+            const user = await db.collection('users').findOne({ uid });
+            if (!user) {
                 socket.emit('leaveGroupResponse', { success: false, message: 'User does not exist' });
                 return;
             }
@@ -818,32 +836,42 @@ io.on('connection', (socket) => {
                 return;
             }
 
-            groupChat.members = groupChat.members.filter(memberUid => memberUid !== uid);
-            const user = users.get(uid);
+            await db.collection('groupChats').updateOne(
+                { groupId },
+                { $pull: { members: uid } }
+            );
 
+            const updatedGroup = await db.collection('groupChats').findOne({ groupId });
             if (groupChat.adminUid === uid) {
-                if (groupChat.members.length > 0) {
-                    groupChat.adminUid = groupChat.members[0];
+                if (updatedGroup.members.length > 0) {
+                    await db.collection('groupChats').updateOne(
+                        { groupId },
+                        { $set: { adminUid: updatedGroup.members[0] } }
+                    );
                 } else {
-                    groupChats.delete(chatId);
-                    groupChatMessages.delete(chatId);
+                    // 保留群組資料，避免刪除
+                    console.log(`Group ${groupId} has no members, but retained for future joins`);
                 }
             }
 
-            if (groupChat.members.length > 0) {
+            if (updatedGroup.members.length > 0) {
                 const messageData = {
-                    chatId,
+                    chatId: groupChat.chatId,
                     type: 'system',
                     message: `${user.nickname} has left the group`,
                     timestamp: Date.now()
                 };
-                groupChatMessages.get(chatId).push(messageData);
-                groupChat.members.forEach(userId => {
-                    if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
-                        const member = users.get(userId);
-                        member.socket.emit('groupMessage', messageData);
+                await db.collection('groupChatMessages').updateOne(
+                    { chatId: groupChat.chatId },
+                    { $push: { messages: messageData } }
+                );
+
+                for (const userId of updatedGroup.members) {
+                    const member = await db.collection('users').findOne({ uid: userId });
+                    if (member.online && member.socketId) {
+                        io.to(member.socketId).emit('groupMessage', messageData);
                     }
-                });
+                }
             }
 
             socket.emit('leaveGroupResponse', { success: true, message: 'Left group successfully' });
@@ -853,23 +881,23 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('chatMessage', (data) => {
+    socket.on('chatMessage', async (data) => {
         console.log('Received chat message:', data);
         try {
             const { chatId, fromUid, message, timestamp } = data;
 
-            if (!chats.has(chatId)) {
+            const chat = await db.collection('chats').findOne({ chatId });
+            if (!chat) {
                 socket.emit('chatMessageFailed', { chatId, message: 'Chat does not exist' });
                 return;
             }
 
-            const chat = chats.get(chatId);
             if (!chat.members.includes(fromUid)) {
                 socket.emit('chatMessageFailed', { chatId, message: 'Not a chat member' });
                 return;
             }
 
-            const fromUser = users.get(fromUid);
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
             const messageData = {
                 chatId,
                 fromUid,
@@ -878,43 +906,42 @@ io.on('connection', (socket) => {
                 timestamp: timestamp || Date.now()
             };
 
-            if (!chatMessages.has(chatId)) {
-                chatMessages.set(chatId, []);
-            }
-            chatMessages.get(chatId).push(messageData);
+            await db.collection('chatMessages').updateOne(
+                { chatId },
+                { $push: { messages: messageData } },
+                { upsert: true }
+            );
 
-            chat.members.forEach(userId => {
-                if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
-                    const user = users.get(userId);
-                    user.socket.emit('chatMessage', messageData);
-                    console.log(`Sent chatMessage to ${userId} (Socket ID: ${user.socket.id}):`, messageData);
-                } else {
-                    console.log(`User ${userId} is offline or socket not connected, message stored`);
+            for (const userId of chat.members) {
+                const user = await db.collection('users').findOne({ uid: userId });
+                if (user.online && user.socketId) {
+                    io.to(user.socketId).emit('chatMessage', messageData);
+                    console.log(`Sent chatMessage to ${userId} (Socket ID: ${user.socketId}):`, messageData);
                 }
-            });
+            }
         } catch (error) {
             console.error('Failed to process chat message:', error);
             socket.emit('chatMessageFailed', { chatId: data.chatId, message: 'Failed to send message: ' + error.message });
         }
     });
 
-    socket.on('groupMessage', (data) => {
+    socket.on('groupMessage', async (data) => {
         console.log('Received group message:', data);
         try {
             const { chatId, fromUid, message, timestamp } = data;
 
-            if (!groupChats.has(chatId)) {
+            const groupChat = await db.collection('groupChats').findOne({ chatId });
+            if (!groupChat) {
                 socket.emit('groupMessageFailed', { chatId, message: 'Group chat does not exist' });
                 return;
             }
 
-            const groupChat = groupChats.get(chatId);
             if (!groupChat.members.includes(fromUid)) {
                 socket.emit('groupMessageFailed', { chatId, message: 'Not a group member' });
                 return;
             }
 
-            const fromUser = users.get(fromUid);
+            const fromUser = await db.collection('users').findOne({ uid: fromUid });
             const messageData = {
                 chatId,
                 fromUid,
@@ -923,31 +950,31 @@ io.on('connection', (socket) => {
                 timestamp: timestamp || Date.now()
             };
 
-            if (!groupChatMessages.has(chatId)) {
-                groupChatMessages.set(chatId, []);
-            }
-            groupChatMessages.get(chatId).push(messageData);
+            await db.collection('groupChatMessages').updateOne(
+                { chatId },
+                { $push: { messages: messageData } },
+                { upsert: true }
+            );
 
-            groupChat.members.forEach(userId => {
-                if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
-                    const user = users.get(userId);
-                    user.socket.emit('groupMessage', messageData);
-                    console.log(`Sent groupMessage to ${userId} (Socket ID: ${user.socket.id}):`, messageData);
-                } else {
-                    console.log(`User ${userId} is offline or socket not connected, message stored`);
+            for (const userId of groupChat.members) {
+                const user = await db.collection('users').findOne({ uid: userId });
+                if (user.online && user.socketId) {
+                    io.to(user.socketId).emit('groupMessage', messageData);
+                    console.log(`Sent groupMessage to ${userId} (Socket ID: ${user.socketId}):`, messageData);
                 }
-            });
+            }
         } catch (error) {
             console.error('Failed to process group message:', error);
             socket.emit('groupMessageFailed', { chatId: data.chatId, message: 'Failed to send group message: ' + error.message });
         }
     });
 
-    socket.on('getChatList', (data) => {
+    socket.on('getChatList', async (data) => {
         console.log('Received get chat list request:', data);
         try {
             const { uid } = data;
-            if (!users.has(uid)) {
+            const user = await db.collection('users').findOne({ uid });
+            if (!user) {
                 socket.emit('getChatListResponse', { success: false, message: 'User does not exist' });
                 return;
             }
@@ -955,15 +982,17 @@ io.on('connection', (socket) => {
             const chatList = [];
             const seenChatIds = new Set();
 
-            for (let [chatId, chat] of chats.entries()) {
-                if (chat.members.includes(uid) && !seenChatIds.has(chatId)) {
-                    seenChatIds.add(chatId);
-                    const messages = chatMessages.get(chatId) || [];
+            const privateChats = await db.collection('chats').find({ members: uid }).toArray();
+            for (const chat of privateChats) {
+                if (!seenChatIds.has(chat.chatId)) {
+                    seenChatIds.add(chat.chatId);
+                    const messagesDoc = await db.collection('chatMessages').findOne({ chatId: chat.chatId });
+                    const messages = messagesDoc ? messagesDoc.messages : [];
                     const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
                     const otherUserId = chat.members.find(userId => userId !== uid);
-                    const otherUser = users.get(otherUserId);
+                    const otherUser = await db.collection('users').findOne({ uid: otherUserId });
                     chatList.push({
-                        chatId,
+                        chatId: chat.chatId,
                         type: 'private',
                         name: otherUser ? otherUser.nickname : otherUserId,
                         lastMessage
@@ -971,13 +1000,15 @@ io.on('connection', (socket) => {
                 }
             }
 
-            for (let [chatId, groupChat] of groupChats.entries()) {
-                if (groupChat.members.includes(uid) && !seenChatIds.has(chatId)) {
-                    seenChatIds.add(chatId);
-                    const messages = groupChatMessages.get(chatId) || [];
+            const groupChats = await db.collection('groupChats').find({ members: uid }).toArray();
+            for (const groupChat of groupChats) {
+                if (!seenChatIds.has(groupChat.chatId)) {
+                    seenChatIds.add(groupChat.chatId);
+                    const messagesDoc = await db.collection('groupChatMessages').findOne({ chatId: groupChat.chatId });
+                    const messages = messagesDoc ? messagesDoc.messages : [];
                     const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
                     chatList.push({
-                        chatId,
+                        chatId: groupChat.chatId,
                         type: 'group',
                         name: groupChat.name,
                         lastMessage
@@ -992,19 +1023,18 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('getFriendList', (data) => {
+    socket.on('getFriendList', async (data) => {
         console.log('Received get friend list request:', data);
         try {
             const { uid } = data;
-            if (!users.has(uid)) {
+            const user = await db.collection('users').findOne({ uid });
+            if (!user) {
                 socket.emit('getFriendListResponse', { success: false, message: 'User does not exist' });
                 return;
             }
 
-            const user = users.get(uid);
             const uniqueFriends = [];
             const seenUids = new Set();
-
             user.friends.forEach(friend => {
                 if (!seenUids.has(friend.uid)) {
                     seenUids.add(friend.uid);
@@ -1019,19 +1049,25 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('getChatHistory', (data) => {
+    socket.on('getChatHistory', async (data) => {
         console.log('Received get chat history request:', data);
         try {
             const { chatId } = data;
             let messages = [];
 
-            if (chats.has(chatId)) {
-                messages = chatMessages.get(chatId) || [];
-            } else if (groupChats.has(chatId)) {
-                messages = groupChatMessages.get(chatId) || [];
+            const privateChat = await db.collection('chats').findOne({ chatId });
+            if (privateChat) {
+                const messagesDoc = await db.collection('chatMessages').findOne({ chatId });
+                messages = messagesDoc ? messagesDoc.messages : [];
             } else {
-                socket.emit('getChatHistoryResponse', { success: false, message: 'Chat does not exist' });
-                return;
+                const groupChat = await db.collection('groupChats').findOne({ chatId });
+                if (groupChat) {
+                    const messagesDoc = await db.collection('groupChatMessages').findOne({ chatId });
+                    messages = messagesDoc ? messagesDoc.messages : [];
+                } else {
+                    socket.emit('getChatHistoryResponse', { success: false, message: 'Chat does not exist' });
+                    return;
+                }
             }
 
             socket.emit('getChatHistoryResponse', { success: true, messages });
@@ -1048,7 +1084,3 @@ function generateUid() {
         return v.toString(16);
     });
 }
-
-http.listen(port, () => {
-    console.log(`Server running on port ${port}`);
-});
