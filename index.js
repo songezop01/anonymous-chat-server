@@ -2,28 +2,23 @@ const express = require('express');
 const app = express();
 const http = require('http').Server(app);
 const io = require('socket.io')(http, {
-    pingTimeout: 120000, // 增加 pingTimeout 至 120 秒
-    pingInterval: 30000, // 增加 pingInterval 至 30 秒
+    pingTimeout: 120000,
+    pingInterval: 30000,
     cors: {
-        origin: ["http://localhost:3000", "https://anonymous-chat-server-d43x.onrender.com"],
+        origin: "*",
         methods: ["GET", "POST"],
         credentials: true
     }
 });
 const port = process.env.PORT || 3000;
 
-// 用於儲存用戶、好友和聊天數據
-const users = new Map(); // uid -> {username, password, nickname, socket, deviceInfo, friends}
-const chats = new Map(); // chatId -> {type: 'private', members: [uid1, uid2], name}
-const groupChats = new Map(); // chatId -> {type: 'group', groupId, name, password, adminUid, members: [uids]}
-
-// 儲存聊天訊息歷史
-const chatMessages = new Map(); // chatId -> [{fromUid, message, nickname, timestamp}]
-const groupChatMessages = new Map(); // chatId -> [{fromUid, message, nickname, timestamp}]
-
-// 儲存離線好友請求和群組加入請求
-const pendingFriendRequests = new Map(); // toUid -> [{fromUid, fromNickname, timestamp}]
-const pendingGroupJoinRequests = new Map(); // groupId -> [{fromUid, fromNickname, timestamp}]
+const users = new Map();
+const chats = new Map();
+const groupChats = new Map();
+const chatMessages = new Map();
+const groupChatMessages = new Map();
+const pendingFriendRequests = new Map();
+const pendingGroupJoinRequests = new Map();
 
 app.use(express.static('public'));
 
@@ -102,6 +97,10 @@ io.on('connection', (socket) => {
             let uid = null;
             for (let [key, user] of users.entries()) {
                 if (user.username === username && user.password === password) {
+                    if (user.socket && user.socket.connected) {
+                        user.socket.disconnect();
+                        console.log(`Disconnected previous socket for user ${username}`);
+                    }
                     foundUser = user;
                     uid = key;
                     break;
@@ -123,7 +122,23 @@ io.on('connection', (socket) => {
                     nickname: foundUser.nickname || username
                 });
 
-                // 檢查是否有未處理的好友請求
+                for (let [chatId, chat] of chats.entries()) {
+                    if (chat.members.includes(uid)) {
+                        const messages = chatMessages.get(chatId) || [];
+                        messages.forEach(message => {
+                            socket.emit('chatMessage', message);
+                        });
+                    }
+                }
+                for (let [chatId, groupChat] of groupChats.entries()) {
+                    if (groupChat.members.includes(uid)) {
+                        const messages = groupChatMessages.get(chatId) || [];
+                        messages.forEach(message => {
+                            socket.emit('groupMessage', message);
+                        });
+                    }
+                }
+
                 if (pendingFriendRequests.has(uid)) {
                     const requests = pendingFriendRequests.get(uid);
                     requests.forEach(request => {
@@ -135,7 +150,6 @@ io.on('connection', (socket) => {
                     pendingFriendRequests.delete(uid);
                 }
 
-                // 檢查是否有未處理的群組加入請求
                 for (let [groupId, requests] of pendingGroupJoinRequests.entries()) {
                     const groupChat = Array.from(groupChats.entries()).find(([_, group]) => group.groupId === groupId)?.[1];
                     if (groupChat && groupChat.adminUid === uid) {
@@ -809,14 +823,13 @@ io.on('connection', (socket) => {
             }
             chatMessages.get(chatId).push(messageData);
 
-            // 推送給所有聊天成員，包括發送者
             chat.members.forEach(userId => {
                 if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
                     const user = users.get(userId);
                     user.socket.emit('chatMessage', messageData);
                     console.log(`Sent chatMessage to ${userId} (Socket ID: ${user.socket.id}):`, messageData);
                 } else {
-                    console.log(`User ${userId} is offline or socket not connected, message stored for later delivery`);
+                    console.log(`User ${userId} is offline or socket not connected, message stored`);
                 }
             });
         } catch (error) {
@@ -855,14 +868,13 @@ io.on('connection', (socket) => {
             }
             groupChatMessages.get(chatId).push(messageData);
 
-            // 推送給所有群組成員，包括發送者
             groupChat.members.forEach(userId => {
                 if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
                     const user = users.get(userId);
                     user.socket.emit('groupMessage', messageData);
                     console.log(`Sent groupMessage to ${userId} (Socket ID: ${user.socket.id}):`, messageData);
                 } else {
-                    console.log(`User ${userId} is offline or socket not connected, message stored for later delivery`);
+                    console.log(`User ${userId} is offline or socket not connected, message stored`);
                 }
             });
         } catch (error) {
