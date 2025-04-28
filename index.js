@@ -10,30 +10,43 @@ const io = require('socket.io')(http, {
         credentials: true
     }
 });
-const { MongoClient } = require('mongodb'); // 引入 MongoDB 客戶端
+const { MongoClient } = require('mongodb');
 const port = process.env.PORT || 10000;
 
-// MongoDB 連線設定
-const uri = "mongodb://localhost:27017"; // MongoDB 連線 URI，根據你的環境調整
-const client = new MongoClient(uri);
+// MongoDB 連線設定，從環境變數中讀取連線字符串
+const uri = process.env.MONGODB_URI || "mongodb://localhost:27017"; // 如果環境變數未設置，預設為本地地址（僅用於本地開發）
+const client = new MongoClient(uri, {
+    serverSelectionTimeoutMS: 5000, // 伺服器選擇超時時間
+    connectTimeoutMS: 10000, // 連線超時時間
+});
 let db;
 
-// 連接到 MongoDB
+// 連接到 MongoDB，並添加重試邏輯
 async function connectToMongo() {
-    try {
-        await client.connect();
-        console.log("Connected to MongoDB");
-        db = client.db("anonymousChat"); // 資料庫名稱
-        // 確保集合存在（MongoDB 會自動創建）
-        await db.createCollection("users");
-        await db.createCollection("chats");
-        await db.createCollection("groupChats");
-        await db.createCollection("chatMessages");
-        await db.createCollection("groupChatMessages");
-        await db.createCollection("pendingRequests");
-    } catch (error) {
-        console.error("Failed to connect to MongoDB:", error);
-        process.exit(1); // 如果連線失敗，退出程序
+    let retries = 5;
+    while (retries > 0) {
+        try {
+            await client.connect();
+            console.log("Connected to MongoDB");
+            db = client.db("anonymousChat");
+            // 確保集合存在
+            await db.createCollection("users");
+            await db.createCollection("chats");
+            await db.createCollection("groupChats");
+            await db.createCollection("chatMessages");
+            await db.createCollection("groupChatMessages");
+            await db.createCollection("pendingRequests");
+            return; // 連線成功，退出函數
+        } catch (error) {
+            console.error(`Failed to connect to MongoDB (attempt ${6 - retries}/5):`, error);
+            retries--;
+            if (retries === 0) {
+                console.error("Exhausted all retries, exiting...");
+                process.exit(1);
+            }
+            // 等待 5 秒後重試
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        }
     }
 }
 
@@ -42,6 +55,9 @@ connectToMongo().then(() => {
     http.listen(port, () => {
         console.log(`Server running on port ${port}`);
     });
+}).catch(err => {
+    console.error("Failed to start server due to MongoDB connection error:", err);
+    process.exit(1);
 });
 
 app.use(express.static('public'));
@@ -64,7 +80,6 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', (reason) => {
         console.log(`User disconnected: ${socket.id}, Reason: ${reason}`);
-        // 不再直接移除用戶，而是更新在線狀態
         db.collection('users').updateOne(
             { socketId: socket.id },
             { $set: { online: false, socketId: null } }
@@ -76,7 +91,6 @@ io.on('connection', (socket) => {
         try {
             const { username, password, nickname, deviceInfo } = data;
 
-            // 檢查用戶是否已存在
             const existingUser = await db.collection('users').findOne({ username });
             if (existingUser) {
                 socket.emit('registerResponse', { success: false, message: 'Username already exists' });
@@ -114,7 +128,6 @@ io.on('connection', (socket) => {
 
             const user = await db.collection('users').findOne({ username, password });
             if (user) {
-                // 更新用戶的 socket 和在線狀態
                 await db.collection('users').updateOne(
                     { uid: user.uid },
                     {
@@ -138,7 +151,6 @@ io.on('connection', (socket) => {
                     nickname: user.nickname || username
                 });
 
-                // 推送私聊訊息
                 const userChats = await db.collection('chats').find({ members: user.uid }).toArray();
                 for (const chat of userChats) {
                     const messages = await db.collection('chatMessages').find({ chatId: chat.chatId }).toArray();
@@ -147,7 +159,6 @@ io.on('connection', (socket) => {
                     });
                 }
 
-                // 推送群組訊息
                 const userGroupChats = await db.collection('groupChats').find({ members: user.uid }).toArray();
                 for (const groupChat of userGroupChats) {
                     const messages = await db.collection('groupChatMessages').find({ chatId: groupChat.chatId }).toArray();
@@ -156,7 +167,6 @@ io.on('connection', (socket) => {
                     });
                 }
 
-                // 推送待處理請求
                 const requests = await db.collection('pendingRequests').find({ toUid: user.uid }).toArray();
                 requests.forEach(request => {
                     if (request.type === 'friend') {
@@ -175,7 +185,6 @@ io.on('connection', (socket) => {
                 });
                 await db.collection('pendingRequests').deleteMany({ toUid: user.uid });
 
-                // 推送群組加入請求（給管理員）
                 const adminGroups = await db.collection('groupChats').find({ adminUid: user.uid }).toArray();
                 for (const group of adminGroups) {
                     const groupRequests = await db.collection('pendingRequests').find({ groupId: group.groupId, type: 'joinGroup' }).toArray();
@@ -212,7 +221,6 @@ io.on('connection', (socket) => {
                 { $set: { nickname } }
             );
 
-            // 更新所有好友列表中的暱稱
             await db.collection('users').updateMany(
                 { "friends.uid": uid },
                 { $set: { "friends.$.nickname": nickname } }
@@ -849,7 +857,6 @@ io.on('connection', (socket) => {
                         { $set: { adminUid: updatedGroup.members[0] } }
                     );
                 } else {
-                    // 保留群組資料，避免刪除
                     console.log(`Group ${groupId} has no members, but retained for future joins`);
                 }
             }
