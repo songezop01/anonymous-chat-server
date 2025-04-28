@@ -2,15 +2,15 @@ const express = require('express');
 const app = express();
 const http = require('http').Server(app);
 const io = require('socket.io')(http, {
-    pingTimeout: 120000,
-    pingInterval: 30000,
+    pingTimeout: 60000, // 增加 pingTimeout 至 60 秒
+    pingInterval: 25000, // 設置 pingInterval 為 25 秒
     cors: {
         origin: "*",
         methods: ["GET", "POST"],
         credentials: true
     }
 });
-const port = process.env.PORT || 3000;
+const port = process.env.PORT || 10000; // Render 環境需要使用 10000 端口
 
 const users = new Map();
 const chats = new Map();
@@ -97,10 +97,6 @@ io.on('connection', (socket) => {
             let uid = null;
             for (let [key, user] of users.entries()) {
                 if (user.username === username && user.password === password) {
-                    if (user.socket && user.socket.connected) {
-                        user.socket.disconnect();
-                        console.log(`Disconnected previous socket for user ${username}`);
-                    }
                     foundUser = user;
                     uid = key;
                     break;
@@ -108,6 +104,7 @@ io.on('connection', (socket) => {
             }
 
             if (foundUser) {
+                // 更新 socket 並確保不重複斷開
                 foundUser.socket = socket;
                 foundUser.deviceInfo = {
                     ipAddress: socket.handshake.address,
