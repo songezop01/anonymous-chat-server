@@ -2,23 +2,22 @@ const express = require('express');
 const app = express();
 const http = require('http').Server(app);
 const io = require('socket.io')(http, {
-    pingTimeout: 60000, // 增加 pingTimeout 至 60 秒
-    pingInterval: 25000, // 設置 pingInterval 為 25 秒
+    pingTimeout: 60000,
+    pingInterval: 25000,
     cors: {
         origin: "*",
         methods: ["GET", "POST"],
         credentials: true
     }
 });
-const port = process.env.PORT || 10000; // Render 環境需要使用 10000 端口
+const port = process.env.PORT || 10000;
 
 const users = new Map();
 const chats = new Map();
 const groupChats = new Map();
 const chatMessages = new Map();
 const groupChatMessages = new Map();
-const pendingFriendRequests = new Map();
-const pendingGroupJoinRequests = new Map();
+const pendingRequests = new Map(); // 統一存儲待處理好友和群組請求：uid -> [{type: 'friend', fromUid, fromNickname, timestamp}, {type: 'group', groupId, groupName, fromUid, fromNickname, timestamp}]
 
 app.use(express.static('public'));
 
@@ -104,7 +103,6 @@ io.on('connection', (socket) => {
             }
 
             if (foundUser) {
-                // 更新 socket 並確保不重複斷開
                 foundUser.socket = socket;
                 foundUser.deviceInfo = {
                     ipAddress: socket.handshake.address,
@@ -136,28 +134,40 @@ io.on('connection', (socket) => {
                     }
                 }
 
-                if (pendingFriendRequests.has(uid)) {
-                    const requests = pendingFriendRequests.get(uid);
+                // 推送所有待處理請求（好友和群組）
+                if (pendingRequests.has(uid)) {
+                    const requests = pendingRequests.get(uid);
                     requests.forEach(request => {
-                        socket.emit('friendRequest', {
-                            fromUid: request.fromUid,
-                            fromNickname: request.fromNickname
-                        });
-                    });
-                    pendingFriendRequests.delete(uid);
-                }
-
-                for (let [groupId, requests] of pendingGroupJoinRequests.entries()) {
-                    const groupChat = Array.from(groupChats.entries()).find(([_, group]) => group.groupId === groupId)?.[1];
-                    if (groupChat && groupChat.adminUid === uid) {
-                        requests.forEach(request => {
-                            socket.emit('joinGroupRequest', {
-                                groupId,
+                        if (request.type === 'friend') {
+                            socket.emit('friendRequest', {
                                 fromUid: request.fromUid,
                                 fromNickname: request.fromNickname
                             });
+                        } else if (request.type === 'group') {
+                            socket.emit('inviteToGroup', {
+                                groupId: request.groupId,
+                                groupName: request.groupName,
+                                fromUid: request.fromUid,
+                                fromNickname: request.fromNickname
+                            });
+                        }
+                    });
+                    pendingRequests.delete(uid);
+                }
+
+                // 推送群組加入請求（給管理員）
+                for (let [groupId, requests] of pendingRequests.entries()) {
+                    const groupChat = Array.from(groupChats.entries()).find(([_, group]) => group.groupId === groupId)?.[1];
+                    if (groupChat && groupChat.adminUid === uid) {
+                        requests.forEach(request => {
+                            if (request.type === 'joinGroup') {
+                                socket.emit('joinGroupRequest', {
+                                    groupId,
+                                    fromUid: request.fromUid,
+                                    fromNickname: request.fromNickname
+                                });
+                            }
                         });
-                        pendingGroupJoinRequests.delete(groupId);
                     }
                 }
             } else {
@@ -220,10 +230,11 @@ io.on('connection', (socket) => {
                 });
                 socket.emit('friendRequestResponse', { success: true });
             } else {
-                if (!pendingFriendRequests.has(toUid)) {
-                    pendingFriendRequests.set(toUid, []);
+                if (!pendingRequests.has(toUid)) {
+                    pendingRequests.set(toUid, []);
                 }
-                pendingFriendRequests.get(toUid).push({
+                pendingRequests.get(toUid).push({
+                    type: 'friend',
                     fromUid,
                     fromNickname: fromUser.nickname,
                     timestamp: Date.now()
@@ -274,10 +285,11 @@ io.on('connection', (socket) => {
                 });
                 socket.emit('friendRequestResponse', { success: true });
             } else {
-                if (!pendingFriendRequests.has(toUid)) {
-                    pendingFriendRequests.set(toUid, []);
+                if (!pendingRequests.has(toUid)) {
+                    pendingRequests.set(toUid, []);
                 }
-                pendingFriendRequests.get(toUid).push({
+                pendingRequests.get(toUid).push({
+                    type: 'friend',
                     fromUid,
                     fromNickname: fromUser.nickname,
                     timestamp: Date.now()
@@ -447,7 +459,7 @@ io.on('connection', (socket) => {
     socket.on('searchGroups', (data) => {
         console.log('Received search groups request:', data);
         try {
-            const { query, fromUid } = data;
+            const { query, password, fromUid } = data;
             const results = [];
 
             for (let [chatId, group] of groupChats.entries()) {
@@ -461,7 +473,44 @@ io.on('connection', (socket) => {
                 }
             }
 
-            socket.emit('searchGroupsResponse', { success: true, groups: results });
+            if (password) {
+                let joined = false;
+                for (let group of results) {
+                    const groupChat = Array.from(groupChats.entries()).find(([_, g]) => g.groupId === group.groupId)?.[1];
+                    if (groupChat && groupChat.password === password) {
+                        if (!groupChat.members.includes(fromUid)) {
+                            groupChat.members.push(fromUid);
+                            const fromUser = users.get(fromUid);
+                            socket.emit('joinGroupApproved', {
+                                chatId: group.chatId,
+                                name: groupChat.name
+                            });
+
+                            const messageData = {
+                                chatId: group.chatId,
+                                type: 'system',
+                                message: `${fromUser.nickname} has joined the group`,
+                                timestamp: Date.now()
+                            };
+                            groupChatMessages.get(group.chatId).push(messageData);
+                            groupChat.members.forEach(userId => {
+                                if (users.has(userId) && users.get(userId).socket && users.get(userId).socket.connected) {
+                                    const user = users.get(userId);
+                                    user.socket.emit('groupMessage', messageData);
+                                }
+                            });
+                            joined = true;
+                            socket.emit('searchGroupsResponse', { success: true, joined: true, chatId: group.chatId });
+                            return;
+                        }
+                    }
+                }
+                if (!joined) {
+                    socket.emit('searchGroupsResponse', { success: true, groups: results, message: 'Password incorrect or no matching group found' });
+                }
+            } else {
+                socket.emit('searchGroupsResponse', { success: true, groups: results, message: 'Please provide a password to join directly' });
+            }
         } catch (error) {
             console.error('Failed to process search groups:', error);
             socket.emit('searchGroupsResponse', { success: false, message: 'Search groups failed: ' + error.message });
@@ -513,10 +562,12 @@ io.on('connection', (socket) => {
                 });
                 socket.emit('joinGroupResponse', { success: true });
             } else {
-                if (!pendingGroupJoinRequests.has(groupId)) {
-                    pendingGroupJoinRequests.set(groupId, []);
+                if (!pendingRequests.has(groupChat.adminUid)) {
+                    pendingRequests.set(groupChat.adminUid, []);
                 }
-                pendingGroupJoinRequests.get(groupId).push({
+                pendingRequests.get(groupChat.adminUid).push({
+                    type: 'joinGroup',
+                    groupId,
                     fromUid,
                     fromNickname: fromUser.nickname,
                     timestamp: Date.now()
@@ -641,6 +692,18 @@ io.on('connection', (socket) => {
                             groupName: groupChat.name,
                             fromUid,
                             fromNickname: fromUser.nickname
+                        });
+                    } else {
+                        if (!pendingRequests.has(friendUid)) {
+                            pendingRequests.set(friendUid, []);
+                        }
+                        pendingRequests.get(friendUid).push({
+                            type: 'group',
+                            groupId: groupChat.groupId,
+                            groupName: groupChat.name,
+                            fromUid,
+                            fromNickname: fromUser.nickname,
+                            timestamp: Date.now()
                         });
                     }
                 }
@@ -796,13 +859,13 @@ io.on('connection', (socket) => {
             const { chatId, fromUid, message, timestamp } = data;
 
             if (!chats.has(chatId)) {
-                socket.emit('chatMessageFailed', { message: 'Chat does not exist' });
+                socket.emit('chatMessageFailed', { chatId, message: 'Chat does not exist' });
                 return;
             }
 
             const chat = chats.get(chatId);
             if (!chat.members.includes(fromUid)) {
-                socket.emit('chatMessageFailed', { message: 'Not a chat member' });
+                socket.emit('chatMessageFailed', { chatId, message: 'Not a chat member' });
                 return;
             }
 
@@ -831,7 +894,7 @@ io.on('connection', (socket) => {
             });
         } catch (error) {
             console.error('Failed to process chat message:', error);
-            socket.emit('chatMessageFailed', { message: 'Failed to send message: ' + error.message });
+            socket.emit('chatMessageFailed', { chatId: data.chatId, message: 'Failed to send message: ' + error.message });
         }
     });
 
@@ -841,13 +904,13 @@ io.on('connection', (socket) => {
             const { chatId, fromUid, message, timestamp } = data;
 
             if (!groupChats.has(chatId)) {
-                socket.emit('groupMessageFailed', { message: 'Group chat does not exist' });
+                socket.emit('groupMessageFailed', { chatId, message: 'Group chat does not exist' });
                 return;
             }
 
             const groupChat = groupChats.get(chatId);
             if (!groupChat.members.includes(fromUid)) {
-                socket.emit('groupMessageFailed', { message: 'Not a group member' });
+                socket.emit('groupMessageFailed', { chatId, message: 'Not a group member' });
                 return;
             }
 
@@ -876,7 +939,7 @@ io.on('connection', (socket) => {
             });
         } catch (error) {
             console.error('Failed to process group message:', error);
-            socket.emit('groupMessageFailed', { message: 'Failed to send group message: ' + error.message });
+            socket.emit('groupMessageFailed', { chatId: data.chatId, message: 'Failed to send group message: ' + error.message });
         }
     });
 
