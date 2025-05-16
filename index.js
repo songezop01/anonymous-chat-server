@@ -8,20 +8,24 @@ const io = require('socket.io')(http, {
         origin: "*",
         methods: ["GET", "POST"],
         credentials: true
-    }
+    },
+    transports: ['websocket', 'polling'], // 支持 WebSocket 和 polling，適配5G
+    allowEIO3: true, // 兼容舊版客戶端
+    maxHttpBufferSize: 1e7, // 增加緩衝區，適配5G高速傳輸
+    perMessageDeflate: false // 禁用壓縮，降低5G延遲
 });
 const { MongoClient } = require('mongodb');
 const port = process.env.PORT || 10000;
 
-// MongoDB 連線設定，從環境變數中讀取連線字符串
-const uri = process.env.MONGODB_URI || "mongodb://localhost:27017"; // 如果環境變數未設置，預設為本地地址（僅用於本地開發）
+// MongoDB 連線設定
+const uri = process.env.MONGODB_URI || "mongodb://localhost:27017";
 const client = new MongoClient(uri, {
-    serverSelectionTimeoutMS: 5000, // 伺服器選擇超時時間
-    connectTimeoutMS: 10000, // 連線超時時間
+    serverSelectionTimeoutMS: 5000,
+    connectTimeoutMS: 10000,
 });
 let db;
 
-// 連接到 MongoDB，並添加重試邏輯
+// 連接到 MongoDB，帶重試邏輯
 async function connectToMongo() {
     let retries = 5;
     while (retries > 0) {
@@ -29,14 +33,13 @@ async function connectToMongo() {
             await client.connect();
             console.log("Connected to MongoDB");
             db = client.db("anonymousChat");
-            // 確保集合存在
             await db.createCollection("users");
             await db.createCollection("chats");
             await db.createCollection("groupChats");
             await db.createCollection("chatMessages");
-            await db.createCollection("groupChatMessages");
+            await db.collection("groupChatMessages");
             await db.createCollection("pendingRequests");
-            return; // 連線成功，退出函數
+            return;
         } catch (error) {
             console.error(`Failed to connect to MongoDB (attempt ${6 - retries}/5):`, error);
             retries--;
@@ -44,13 +47,12 @@ async function connectToMongo() {
                 console.error("Exhausted all retries, exiting...");
                 process.exit(1);
             }
-            // 等待 5 秒後重試
             await new Promise(resolve => setTimeout(resolve, 5000));
         }
     }
 }
 
-// 在伺服器啟動前連接到 MongoDB
+// 啟動伺服器
 connectToMongo().then(() => {
     http.listen(port, () => {
         console.log(`Server running on port ${port}`);
@@ -72,14 +74,19 @@ app.use((err, req, res, next) => {
 });
 
 io.on('connection', (socket) => {
-    console.log(`User connected: ${socket.id}`);
+    console.log(`User connected: ${socket.id}, Transport: ${socket.conn.transport.name}`);
+
+    // 監聽傳輸層切換
+    socket.conn.on('upgrade', () => {
+        console.log(`Transport upgraded for ${socket.id}: ${socket.conn.transport.name}`);
+    });
 
     socket.on('error', (error) => {
-        console.error(`Socket error: ${socket.id}, Error: ${error.message}`);
+        console.error(`Socket error: ${socket.id}, Error: ${error.message}, Transport: ${socket.conn.transport.name}`);
     });
 
     socket.on('disconnect', (reason) => {
-        console.log(`User disconnected: ${socket.id}, Reason: ${reason}`);
+        console.log(`User disconnected: ${socket.id}, Reason: ${reason}, Transport: ${socket.conn.transport.name}`);
         db.collection('users').updateOne(
             { socketId: socket.id },
             { $set: { online: false, socketId: null } }
@@ -109,7 +116,8 @@ io.on('connection', (socket) => {
                     ipAddress: socket.handshake.address,
                     androidId: deviceInfo?.androidId || 'unknown',
                     model: deviceInfo?.model || 'unknown',
-                    osVersion: deviceInfo?.osVersion || 'unknown'
+                    osVersion: deviceInfo?.osVersion || 'unknown',
+                    networkType: deviceInfo?.networkType || 'unknown' // 記錄網路類型
                 },
                 friends: []
             });
@@ -138,7 +146,8 @@ io.on('connection', (socket) => {
                                 ipAddress: socket.handshake.address,
                                 androidId: deviceInfo?.androidId || 'unknown',
                                 model: deviceInfo?.model || 'unknown',
-                                osVersion: deviceInfo?.osVersion || 'unknown'
+                                osVersion: deviceInfo?.osVersion || 'unknown',
+                                networkType: deviceInfo?.networkType || 'unknown' // 記錄網路類型
                             }
                         }
                     }
@@ -241,7 +250,7 @@ io.on('connection', (socket) => {
             const fromUser = await db.collection('users').findOne({ uid: fromUid });
             const toUser = await db.collection('users').findOne({ uid: toUid });
 
-            if (!fromUser || !toUser) {
+            if (! fromUser || !toUser) {
                 socket.emit('friendRequestResponse', { success: false, message: 'User does not exist' });
                 return;
             }
@@ -889,7 +898,7 @@ io.on('connection', (socket) => {
     });
 
     socket.on('chatMessage', async (data) => {
-        console.log('Received chat message:', data);
+        console.log('Received chat message:', data, `Transport: ${socket.conn.transport.name}`);
         try {
             const { chatId, fromUid, message, timestamp } = data;
 
@@ -910,7 +919,8 @@ io.on('connection', (socket) => {
                 fromUid,
                 message,
                 nickname: fromUser.nickname,
-                timestamp: timestamp || Date.now()
+                timestamp: timestamp || Date.now(),
+                networkType: fromUser.deviceInfo.networkType || 'unknown' // 記錄網路類型
             };
 
             await db.collection('chatMessages').updateOne(
@@ -922,18 +932,31 @@ io.on('connection', (socket) => {
             for (const userId of chat.members) {
                 const user = await db.collection('users').findOne({ uid: userId });
                 if (user.online && user.socketId) {
-                    io.to(user.socketId).emit('chatMessage', messageData);
-                    console.log(`Sent chatMessage to ${userId} (Socket ID: ${user.socketId}):`, messageData);
+                    let retries = 3;
+                    while (retries > 0) {
+                        try {
+                            io.to(user.socketId).emit('chatMessage', messageData);
+                            console.log(`Sent chatMessage to ${userId} (Socket ID: ${user.socketId}):`, messageData);
+                            break;
+                        } catch (emitError) {
+                            console.error(`Failed to send chatMessage to ${userId}, retry ${4 - retries}/3:`, emitError);
+                            retries--;
+                            if (retries === 0) {
+                                console.error(`Exhausted retries for ${userId}`);
+                            }
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                        }
+                    }
                 }
             }
         } catch (error) {
-            console.error('Failed to process chat message:', error);
+            console.error('Failed to process chat message:', error, `Transport: ${socket.conn.transport.name}`);
             socket.emit('chatMessageFailed', { chatId: data.chatId, message: 'Failed to send message: ' + error.message });
         }
     });
 
     socket.on('groupMessage', async (data) => {
-        console.log('Received group message:', data);
+        console.log('Received group message:', data, `Transport: ${socket.conn.transport.name}`);
         try {
             const { chatId, fromUid, message, timestamp } = data;
 
@@ -954,7 +977,8 @@ io.on('connection', (socket) => {
                 fromUid,
                 message,
                 nickname: fromUser.nickname,
-                timestamp: timestamp || Date.now()
+                timestamp: timestamp || Date.now(),
+                networkType: fromUser.deviceInfo.networkType || 'unknown' // 記錄網路類型
             };
 
             await db.collection('groupChatMessages').updateOne(
@@ -966,12 +990,25 @@ io.on('connection', (socket) => {
             for (const userId of groupChat.members) {
                 const user = await db.collection('users').findOne({ uid: userId });
                 if (user.online && user.socketId) {
-                    io.to(user.socketId).emit('groupMessage', messageData);
-                    console.log(`Sent groupMessage to ${userId} (Socket ID: ${user.socketId}):`, messageData);
+                    let retries = 3;
+                    while (retries > 0) {
+                        try {
+                            io.to(user.socketId).emit('groupMessage', messageData);
+                            console.log(`Sent groupMessage to ${userId} (Socket ID: ${user.socketId}):`, messageData);
+                            break;
+                        } catch (emitError) {
+                            console.error(`Failed to send groupMessage to ${userId}, retry ${4 - retries}/3:`, emitError);
+                            retries--;
+                            if (retries === 0) {
+                                console.error(`Exhausted retries for ${userId}`);
+                            }
+                            await new Promise(resolve => setTimeout(resolve, 1000));
+                        }
+                    }
                 }
             }
         } catch (error) {
-            console.error('Failed to process group message:', error);
+            console.error('Failed to process group message:', error, `Transport: ${socket.conn.transport.name}`);
             socket.emit('groupMessageFailed', { chatId: data.chatId, message: 'Failed to send group message: ' + error.message });
         }
     });
